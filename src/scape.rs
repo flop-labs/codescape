@@ -5,14 +5,20 @@
 //! minimap atlas. Files that are large on screen additionally get real SDF
 //! glyph quads, nearest first, up to `GLYPH_BUDGET`.
 
-use crate::atlas::{self, glyph_index, Image, FONT_COLS};
+use crate::atlas::{self, Image};
 use crate::camera::{v3, Camera, View, V3};
-use crate::layout::{Layout, Rect as GRect, COL_CHARS, FILE_LABEL_H, LINE_H};
-use crate::scan::{self, SourceFile, CLASS_COUNT};
+use crate::diff;
+use crate::layout::Layout;
+use crate::overlay::{FileState, Overlay};
+use crate::scan::{self, SourceFile};
+use crate::scene::{
+    collect_glyphs, hex, overview, reading_view, syntax_palette, Scene, ACCENTS, GLYPH_SLOTS,
+};
 use crate::tour::Tour;
+use crate::trace::Trace;
 use makepad_widgets::makepad_draw::geometry::GeometryCube3D;
 use makepad_widgets::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 live_design! {
@@ -305,51 +311,9 @@ pub struct DrawGlyph {
     pub color: Vec4,
 }
 draw_shader_impl!(DrawGlyph);
-const GLYPH_SLOTS: usize = 13;
-
-const GLYPH_BUDGET: usize = 450_000;
-/// Minimum on-screen line height (px) before a file gets real glyphs.
-const GLYPH_MIN_PX: f32 = 3.0;
-
-fn hex(c: u32) -> [f32; 3] {
-    [
-        ((c >> 16) & 255) as f32 / 255.0,
-        ((c >> 8) & 255) as f32 / 255.0,
-        (c & 255) as f32 / 255.0,
-    ]
-}
 
 fn rgba(c: [f32; 3], a: f32) -> Vec4 {
     vec4(c[0], c[1], c[2], a)
-}
-
-/// Syntax colours, indexed by `scan::C_*`. FLOP palette (DESIGN.md) with
-/// text-safe tints on the Base navy.
-fn syntax_palette() -> [[f32; 3]; CLASS_COUNT] {
-    [
-        hex(0x000000), // space
-        hex(0xC9D1DC), // ident
-        hex(0x00B4D8), // keyword — FLOP Cyan
-        hex(0x7FDBEE), // type
-        hex(0x32D74B), // string — Electric Green
-        hex(0x6FA8FF), // number — FLOP Blue, lifted for text
-        hex(0x6B7785), // comment — Grey
-        hex(0x8A93A0), // punct
-        hex(0x3DC5E0), // heading / attribute
-        hex(0xF5F7FA), // call — Ice White
-    ]
-}
-
-/// Accent per top-level directory (DESIGN.md chart series).
-const ACCENTS: [u32; 4] = [0x00B4D8, 0x32D74B, 0x3D8BFF, 0xA1A7AE];
-
-pub struct Scene {
-    pub sources: Vec<SourceFile>,
-    pub layout: Layout,
-    pub repo: String,
-    pub revision: String,
-    glyph_on: Vec<bool>,
-    glyph_count: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -410,6 +374,8 @@ pub struct CodeScape {
     #[rust]
     tour: Option<Tour>,
     #[rust]
+    trace: Option<Trace>,
+    #[rust]
     opts: Options,
     #[rust]
     frame_index: usize,
@@ -438,6 +404,12 @@ struct Options {
     /// Still mode: jump to this tour time, save a screenshot and exit.
     at: Option<f64>,
     shot: Option<PathBuf>,
+    /// A revision or `a..b` range to mark against the map.
+    diff: Option<String>,
+    /// A pull request to mark, read through `gh`.
+    pr: Option<u32>,
+    /// A Quint ITF counterexample to step through on the spec that produced it.
+    trace: Option<PathBuf>,
 }
 
 impl Options {
@@ -458,6 +430,9 @@ impl Options {
                 "--record-fps" => {
                     o.record_fps = args.next().and_then(|v| v.parse().ok()).unwrap_or(30.0)
                 }
+                "--diff" => o.diff = args.next(),
+                "--pr" => o.pr = args.next().and_then(|v| v.parse().ok()),
+                "--trace" => o.trace = args.next().map(PathBuf::from),
                 "--at" => o.at = args.next().and_then(|v| v.parse().ok()),
                 "--shot" => o.shot = args.next().map(PathBuf::from),
                 "--atlas" => {
@@ -489,8 +464,14 @@ fn git(root: &std::path::Path, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
+/// Makepad implements the mipmapped upload format in its OpenGL backend only:
+/// the Metal and DX11 paths fall through to a `panic!()` on it. Elsewhere the
+/// minimap goes up unmipped, which costs far-view quality — minified tiles
+/// alias, because one quad covers a whole file — but the tool runs.
+const MIPMAP_UPLOAD: bool = cfg!(target_os = "linux");
+
 fn upload(cx: &mut Cx, img: Image, mips: bool) -> Texture {
-    let format = if mips {
+    let format = if mips && MIPMAP_UPLOAD {
         TextureFormat::VecMipBGRAu8_32 {
             width: img.width,
             height: img.height,
@@ -534,14 +515,26 @@ impl CodeScape {
         };
         let revision = git(&root, &["rev-parse", "--short", "HEAD"]);
         let sources = scan::scan_repo(&root);
+        let overlay = self.build_overlay(&root, &sources);
         let mut layout = Layout::build(&sources, &repo);
         let palette = syntax_palette();
-        let (minimap, texel) =
-            atlas::build_minimap(&mut layout, &sources, &palette, self.opts.atlas_size);
+        let (minimap, texel) = atlas::build_minimap(
+            &mut layout,
+            &sources,
+            &palette,
+            &overlay,
+            self.opts.atlas_size,
+        );
         let ttf = cx
             .get_dependency(self.font_file.as_str())
             .expect("bundled monospace font");
         let font = atlas::build_font(&ttf);
+        if !MIPMAP_UPLOAD {
+            log!(
+                "codescape: this platform has no mipmapped texture upload in makepad, \
+                 so the minimap is unmipped and the far view will alias"
+            );
+        }
         let minimap = upload(cx, minimap, true);
         let font = upload(cx, font, false);
         self.draw_tile.draw_vars.set_texture(0, &minimap);
@@ -574,9 +567,96 @@ impl CodeScape {
             layout,
             repo,
             revision,
+            overlay,
             glyph_on: vec![false; n],
             glyph_count: 0,
         });
+        if let Some(path) = self.opts.trace.clone() {
+            self.load_trace(&root, &path);
+        }
+    }
+
+    /// Loads a Quint ITF counterexample and parks the camera on its spec.
+    fn load_trace(&mut self, root: &Path, path: &Path) {
+        let full = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        };
+        let Ok(text) = std::fs::read_to_string(&full) else {
+            log!("codescape: cannot read trace {}", full.display());
+            return;
+        };
+        let Some(mut trace) = Trace::parse(&text) else {
+            log!("codescape: {} is not an ITF trace", full.display());
+            return;
+        };
+        let Some(scene) = self.scene.as_ref() else {
+            return;
+        };
+        if !trace.bind(&scene.sources) {
+            log!(
+                "codescape: trace names {}, which is not on the map",
+                trace.source
+            );
+            return;
+        }
+        let marked: usize = trace.var_lines.iter().map(|l| l.len()).sum();
+        log!(
+            "codescape: trace {} — {} states, {} vars over {} spec lines, status {}",
+            trace.source,
+            trace.states.len(),
+            trace.vars.len(),
+            marked,
+            trace.status
+        );
+        let file = trace.file.unwrap_or_default();
+        let tile = scene.layout.files.iter().position(|f| f.file == file);
+        let height = if self.rect.h > 1.0 {
+            self.rect.h as f32
+        } else {
+            1080.0
+        };
+        if let Some(t) = tile {
+            self.cam = reading_view(&scene.layout, t, height);
+        }
+        self.trace = Some(trace);
+        self.apply_trace();
+    }
+
+    /// Marks for this run: a git diff, a pull request, or nothing.
+    fn build_overlay(&self, root: &Path, sources: &[SourceFile]) -> Overlay {
+        let (patch, label) = if let Some(pr) = self.opts.pr {
+            (diff::patch_for_pr(root, pr), format!("PR #{pr}"))
+        } else if let Some(spec) = &self.opts.diff {
+            let label = if spec.contains("..") {
+                spec.clone()
+            } else {
+                format!("{spec} -> working tree")
+            };
+            (diff::patch_for(root, spec), label)
+        } else {
+            return Overlay::empty(sources.len());
+        };
+        let Some(patch) = patch else {
+            log!(
+                "codescape: could not read the diff for {}; showing no marks",
+                label
+            );
+            return Overlay::empty(sources.len());
+        };
+        let (ov, dropped) = diff::overlay(&patch, sources, label);
+        let (added, removed) = ov.totals();
+        log!(
+            "codescape: diff {} — {} files marked, +{} -{}, {} deleted, {} marks dropped past end of file",
+            ov.label,
+            ov.touched(),
+            added,
+            removed,
+            ov.deleted.len(),
+            dropped
+        );
+        ov
     }
 
     fn view(&self) -> View {
@@ -628,12 +708,39 @@ impl CodeScape {
         self.request_frame(cx);
     }
 
+    /// Advances trace playback and repaints the spec's marks when it steps.
+    fn advance_trace(&mut self, dt: f64) {
+        if self.trace.as_mut().is_some_and(|t| t.tick(dt)) {
+            self.apply_trace();
+        }
+    }
+
+    fn step_trace(&mut self, delta: isize) {
+        if let Some(t) = self.trace.as_mut() {
+            t.seek(delta);
+        }
+        self.apply_trace();
+    }
+
+    /// Rewrites the overlay from the trace's current step. Trace marks live
+    /// only in the glyph layer: the minimap is rasterised once at load, so
+    /// baking a step into it would freeze that step into the far view.
+    fn apply_trace(&mut self) {
+        let (Some(tr), Some(scene)) = (self.trace.as_ref(), self.scene.as_mut()) else {
+            return;
+        };
+        let Some(file) = tr.file else { return };
+        let lines = scene.sources[file].line_count();
+        tr.apply(&mut scene.overlay, lines);
+    }
+
     fn request_frame(&mut self, cx: &mut Cx) {
         self.next_frame = cx.new_next_frame();
     }
 
     fn animating(&self) -> bool {
-        self.fly.is_some()
+        self.trace.as_ref().is_some_and(|t| t.playing)
+            || self.fly.is_some()
             || self.tour.is_some()
             || !self.keys.is_empty()
             || self.opts.record.is_some()
@@ -693,6 +800,7 @@ impl CodeScape {
                 }
             }
         }
+        self.advance_trace(dt);
         if let Some((from, to, start, secs)) = self.fly {
             let start = start.unwrap_or(time);
             self.fly = Some((from, to, Some(start), secs));
@@ -763,15 +871,36 @@ impl CodeScape {
         }
         self.draw_box.end(cx);
 
-        // File tiles.
+        // File tiles. With an overlay active, changed files keep their rim and
+        // everything else recedes, so the shape of the change reads from above.
+        let marked = scene.overlay.touched() > 0;
         self.draw_tile.begin(cx, view);
         for (i, f) in layout.files.iter().enumerate() {
             let t = f.tile;
             self.draw_tile.tile = vec4(t.x, t.z, t.w, t.h);
             self.draw_tile.elev = f.y;
             self.draw_tile.uv = vec4(f.uv[0], f.uv[1], f.uv[2], f.uv[3]);
-            self.draw_tile.bg = vec4(0.035, 0.05, 0.1, 1.0);
-            self.draw_tile.rim = rgba(accent(f.dir), 0.35);
+            match &scene.overlay.files[f.file] {
+                Some(fo) => {
+                    let (c, base) = match fo.state {
+                        FileState::Added => (hex(0x32D74B), 0.55),
+                        FileState::Modified => (hex(0xF2A33C), 0.45),
+                        FileState::Deleted => (hex(0xE5484D), 0.45),
+                    };
+                    // Churn lifts the rim, so a big change is brighter than a typo.
+                    let a = base + (fo.churn() as f32 / 400.0).min(1.0) * 0.45;
+                    self.draw_tile.bg = vec4(0.05, 0.062, 0.115, 1.0);
+                    self.draw_tile.rim = rgba(c, a);
+                }
+                None if marked => {
+                    self.draw_tile.bg = vec4(0.022, 0.03, 0.062, 1.0);
+                    self.draw_tile.rim = rgba(accent(f.dir), 0.1);
+                }
+                None => {
+                    self.draw_tile.bg = vec4(0.035, 0.05, 0.1, 1.0);
+                    self.draw_tile.rim = rgba(accent(f.dir), 0.35);
+                }
+            }
             let hovered = if self.hover == Some(i) { 1.0 } else { 0.0 };
             self.draw_tile.state = vec2(hovered, if scene.glyph_on[i] { 1.0 } else { 0.0 });
             self.draw_tile.draw();
@@ -841,6 +970,74 @@ impl CodeScape {
         self.draw_dim
             .draw_abs(cx, dvec2(x + w - 342.0, y + 27.0), &perf);
 
+        if let Some(tr) = self.trace.as_ref() {
+            let mut body = format!(
+                "{}\nstep {} of {}   {}",
+                tr.source,
+                tr.step + 1,
+                tr.states.len(),
+                if tr.playing { "playing" } else { "paused" }
+            );
+            for (line, changed) in tr.state_lines() {
+                body.push_str(if changed { "\n> " } else { "\n  " });
+                body.push_str(&line);
+            }
+            let rows = 2.0 + tr.vars.len() as f64;
+            self.draw_panel.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(x + 16.0, y + 112.0),
+                    size: dvec2(420.0, 26.0 + rows * 17.0),
+                },
+            );
+            self.draw_title
+                .draw_abs(cx, dvec2(x + 30.0, y + 122.0), "quint counterexample");
+            self.draw_dim
+                .draw_abs(cx, dvec2(x + 30.0, y + 148.0), &body);
+        } else if scene.overlay.touched() > 0 || !scene.overlay.deleted.is_empty() {
+            let ov = &scene.overlay;
+            let (added, removed) = ov.totals();
+            let mut body = format!(
+                "{}\n{} files changed   +{}  -{}",
+                ov.label,
+                ov.touched(),
+                added,
+                removed
+            );
+            // The busiest files, which is what a reviewer wants to find first.
+            let mut top: Vec<(usize, &crate::overlay::FileOverlay)> = ov
+                .files
+                .iter()
+                .enumerate()
+                .filter_map(|(i, f)| f.as_ref().map(|f| (i, f)))
+                .collect();
+            top.sort_by_key(|(_, f)| std::cmp::Reverse(f.churn()));
+            for (i, f) in top.iter().take(6) {
+                body.push_str(&format!(
+                    "\n{} +{:<5} -{:<5} {}",
+                    f.state.tag(),
+                    f.added,
+                    f.removed,
+                    scene.sources[*i].path
+                ));
+            }
+            for (path, removed) in ov.deleted.iter().take(3) {
+                body.push_str(&format!("\nD       -{:<5} {}", removed, path));
+            }
+            let rows = 2.0 + top.len().min(6) as f64 + ov.deleted.len().min(3) as f64;
+            self.draw_panel.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(x + 16.0, y + 112.0),
+                    size: dvec2(560.0, 26.0 + rows * 17.0),
+                },
+            );
+            self.draw_title
+                .draw_abs(cx, dvec2(x + 30.0, y + 122.0), "changed files");
+            self.draw_dim
+                .draw_abs(cx, dvec2(x + 30.0, y + 148.0), &body);
+        }
+
         if let Some(hf) = self.hover {
             let f = &l.files[hf];
             let path = &scene.sources[f.file].path;
@@ -883,228 +1080,6 @@ impl CodeScape {
             self.draw_dim
                 .draw_abs(cx, dvec2(x + 28.0, y + h - 31.0), help);
         }
-    }
-}
-
-/// Instance slots for one glyph, in `DrawGlyph` field order.
-#[rustfmt::skip]
-fn glyph(pos: V3, size: (f32, f32), ch: u8, fade: (f32, f32), col: [f32; 3]) -> [f32; GLYPH_SLOTS] {
-    let gi = glyph_index(ch);
-    [
-        pos.x, pos.y, pos.z, size.0, size.1,
-        (gi % FONT_COLS) as f32, (gi / FONT_COLS) as f32,
-        fade.0, fade.1, col[0], col[1], col[2], 1.0,
-    ]
-}
-
-/// A flat label with glyph cells `h` tall starting at `pos`.
-fn push_label(out: &mut Vec<f32>, text: &[u8], pos: V3, h: f32, col: [f32; 3], fade: (f32, f32)) {
-    for (k, ch) in text.iter().enumerate() {
-        if *ch != b' ' {
-            let p = v3(pos.x + k as f32 * h * 0.5, pos.y, pos.z);
-            out.extend_from_slice(&glyph(p, (h * 0.5, h), *ch, fade, col));
-        }
-    }
-}
-
-/// Emits glyph instances: directory and file labels, then the text of the
-/// files that are largest on screen until `GLYPH_BUDGET` is reached.
-fn collect_glyphs(scene: &mut Scene, view: &View, out: &mut Vec<f32>) {
-    let layout = &scene.layout;
-    let palette = syntax_palette();
-    let accent = |d: usize| hex(ACCENTS[layout.dirs[d].top_level % ACCENTS.len()]);
-    for (i, d) in layout.dirs.iter().enumerate() {
-        let r = d.rect;
-        let h = d.label_h;
-        let label_rect = GRect {
-            x: r.x,
-            z: r.z,
-            w: r.w,
-            h: h * 1.5,
-        };
-        if line_px(view, &label_rect, d.y_top) * h / LINE_H < 1.5
-            || !on_screen(view, &label_rect, d.y_top)
-        {
-            continue;
-        }
-        let pad = (r.w.min(r.h) * 0.02).clamp(6.0, 80.0);
-        let col = if i == 0 { hex(0xF5F7FA) } else { accent(i) };
-        let name = if i == 0 {
-            format!("{} @ {}", d.name, scene.revision)
-        } else {
-            format!("{}/", d.name)
-        };
-        let pos = v3(r.x + pad, d.y_top, r.z + pad * 0.6 + h * 0.2);
-        push_label(out, name.as_bytes(), pos, h, col, (1.5, 3.0));
-    }
-    for f in &layout.files {
-        let lr = GRect {
-            x: f.tile.x,
-            z: f.tile.z - FILE_LABEL_H - 2.0,
-            w: f.tile.w,
-            h: FILE_LABEL_H,
-        };
-        if line_px(view, &lr, f.y) * FILE_LABEL_H / LINE_H < 2.0 || !on_screen(view, &lr, f.y) {
-            continue;
-        }
-        let pos = v3(lr.x, f.y, lr.z);
-        push_label(
-            out,
-            f.name.as_bytes(),
-            pos,
-            FILE_LABEL_H,
-            hex(0xDDE3EA),
-            (2.0, 4.0),
-        );
-    }
-
-    let mut cand: Vec<(f32, usize)> = Vec::new();
-    for (i, f) in layout.files.iter().enumerate() {
-        scene.glyph_on[i] = false;
-        let px = line_px(view, &f.tile, f.y);
-        if px >= GLYPH_MIN_PX && on_screen(view, &f.tile, f.y) {
-            cand.push((px, i));
-        }
-    }
-    cand.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-    for &(_, i) in &cand {
-        if out.len() / GLYPH_SLOTS >= GLYPH_BUDGET {
-            break;
-        }
-        scene.glyph_on[i] = true;
-        let f = &layout.files[i];
-        let src = &scene.sources[f.file];
-        let region = visible_region(view, f.y);
-        for line in 0..src.line_count() {
-            let (x0, z0) = f.char_pos(line);
-            if z0 + LINE_H < region.z
-                || z0 > region.z + region.h
-                || x0 + (COL_CHARS as f32) < region.x
-                || x0 > region.x + region.w
-            {
-                continue;
-            }
-            let (text, class) = src.line(line);
-            let c0 = (region.x - x0).floor().max(0.0) as usize;
-            let c1 = ((region.x + region.w - x0).ceil().max(0.0) as usize)
-                .min(COL_CHARS)
-                .min(text.len());
-            for c in c0..c1 {
-                let ch = text[c];
-                if ch == b' ' {
-                    continue;
-                }
-                let pos = v3(x0 + c as f32, f.y, z0);
-                let col = palette[class[c] as usize];
-                let fade = (GLYPH_MIN_PX, GLYPH_MIN_PX * 2.0);
-                out.extend_from_slice(&glyph(pos, (1.0, LINE_H), ch, fade, col));
-            }
-        }
-    }
-    scene.glyph_count = out.len() / GLYPH_SLOTS;
-}
-
-/// On-screen height in pixels of one text line at the nearest point of `r`.
-fn line_px(view: &View, r: &GRect, y: f32) -> f32 {
-    let nx = view.eye.x.clamp(r.x, r.x + r.w);
-    let nz = view.eye.z.clamp(r.z, r.z + r.h);
-    let d = v3(nx, y, nz).sub(view.eye).len().max(1e-3);
-    LINE_H * view.focal_px / d
-}
-
-/// Conservative test whether a ground rectangle intersects the viewport.
-fn on_screen(view: &View, r: &GRect, y: f32) -> bool {
-    let (w, h) = view.size;
-    let corners = [
-        (r.x, r.z),
-        (r.x + r.w, r.z),
-        (r.x, r.z + r.h),
-        (r.x + r.w, r.z + r.h),
-    ];
-    let (mut minx, mut miny, mut maxx, mut maxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    for (cx, cz) in corners {
-        match view.project(v3(cx, y, cz)) {
-            Some((sx, sy, _)) => {
-                minx = minx.min(sx);
-                maxx = maxx.max(sx);
-                miny = miny.min(sy);
-                maxy = maxy.max(sy);
-            }
-            // A corner behind the camera: only accept if the rect surrounds us.
-            None => return r.contains(view.eye.x, view.eye.z) || line_px(view, r, y) > 1.0,
-        }
-    }
-    maxx >= 0.0 && minx <= w && maxy >= 0.0 && miny <= h
-}
-
-/// Ground-plane rectangle (at height `y`) that can hold readable glyphs:
-/// the view footprint, limited to where a line is at least `GLYPH_MIN_PX`.
-fn visible_region(view: &View, y: f32) -> GRect {
-    let reach = LINE_H * view.focal_px / GLYPH_MIN_PX;
-    let dy = (view.eye.y - y).abs();
-    let r = (reach * reach - dy * dy).max(0.0).sqrt();
-    let (mut x0, mut z0, mut x1, mut z1) = (
-        view.eye.x - r,
-        view.eye.z - r,
-        view.eye.x + r,
-        view.eye.z + r,
-    );
-    let (w, h) = view.size;
-    let mut fx0 = f32::MAX;
-    let mut fz0 = f32::MAX;
-    let mut fx1 = f32::MIN;
-    let mut fz1 = f32::MIN;
-    let mut all_hit = true;
-    for (sx, sy) in [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)] {
-        match view.hit_plane(sx, sy, y) {
-            Some(p) => {
-                fx0 = fx0.min(p.x);
-                fz0 = fz0.min(p.z);
-                fx1 = fx1.max(p.x);
-                fz1 = fz1.max(p.z);
-            }
-            None => all_hit = false,
-        }
-    }
-    if all_hit {
-        x0 = x0.max(fx0);
-        z0 = z0.max(fz0);
-        x1 = x1.min(fx1);
-        z1 = z1.min(fz1);
-    }
-    GRect {
-        x: x0,
-        z: z0,
-        w: (x1 - x0).max(0.0),
-        h: (z1 - z0).max(0.0),
-    }
-}
-
-/// Whole-repo view.
-pub fn overview(l: &Layout) -> Camera {
-    let r = l.dirs[0].rect;
-    let (cx, cz) = r.center();
-    Camera {
-        target: v3(cx, 0.0, cz + r.h * 0.04),
-        dist: r.w.max(r.h) * 1.05,
-        yaw: -0.12,
-        pitch: 0.95,
-    }
-}
-
-/// A camera from which the top of a file tile is readable.
-pub fn reading_view(l: &Layout, f: usize, height_px: f32) -> Camera {
-    let n = &l.files[f];
-    let (_, cz) = n.tile.center();
-    let tx = n.tile.x + (COL_CHARS as f32 * 0.5).min(n.tile.w * 0.5);
-    let focal = height_px * 0.5 / (crate::camera::FOV_Y * 0.5).tan();
-    let dist = LINE_H * focal / 16.0;
-    let tz = (n.tile.z + dist * 0.35).min(cz);
-    Camera {
-        target: v3(tx, n.y, tz),
-        dist,
-        yaw: 0.0,
-        pitch: 1.05,
     }
 }
 
@@ -1209,6 +1184,21 @@ impl Widget for CodeScape {
                         let to = overview(&scene.layout);
                         self.fly_to(cx, to, 1.2);
                     }
+                }
+                KeyCode::Space if self.trace.is_some() => {
+                    if let Some(t) = self.trace.as_mut() {
+                        t.playing = !t.playing;
+                    }
+                    self.request_frame(cx);
+                    self.area.redraw(cx);
+                }
+                KeyCode::Comma if self.trace.is_some() => {
+                    self.step_trace(-1);
+                    self.area.redraw(cx);
+                }
+                KeyCode::Period if self.trace.is_some() => {
+                    self.step_trace(1);
+                    self.area.redraw(cx);
                 }
                 KeyCode::Escape => {
                     self.tour = None;

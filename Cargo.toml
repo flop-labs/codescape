@@ -6,8 +6,23 @@ publish = false
 description = "Fly through the flop-core source tree in 3D (Makepad, GPU-rendered)"
 
 [dependencies]
-makepad-widgets = "1.0.0"
+# Optional so the core library, its tests and the benchmark build on machines
+# without X11/ALSA/PulseAudio development headers.
+makepad-widgets = { version = "1.0.0", optional = true }
 fontdue = "0.9"
+
+[features]
+default = ["gui"]
+gui = ["dep:makepad-widgets"]
+
+[lib]
+name = "codescape"
+path = "src/lib.rs"
+
+[[bin]]
+name = "codescape"
+path = "src/main.rs"
+required-features = ["gui"]
 
 [profile.dev]
 opt-level = 2

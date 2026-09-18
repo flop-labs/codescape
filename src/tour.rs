@@ -3,7 +3,7 @@
 
 use crate::camera::{v3, Camera, V3};
 use crate::layout::{Layout, COL_CHARS, LINE_H};
-use crate::scape::overview;
+use crate::scene::overview;
 
 pub struct Shot {
     cam: Camera,

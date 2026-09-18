@@ -2,6 +2,7 @@
 //! a signed-distance-field atlas of monospace glyphs.
 
 use crate::layout::{Layout, COL_CHARS, LINE_H};
+use crate::overlay::{mark_palette, Overlay, M_NONE};
 use crate::scan::{SourceFile, GLYPH_OTHER};
 
 pub struct Image {
@@ -23,6 +24,7 @@ pub fn build_minimap(
     layout: &mut Layout,
     sources: &[SourceFile],
     palette: &[[f32; 3]],
+    overlay: &Overlay,
     max_size: usize,
 ) -> (Image, f32) {
     let mut order: Vec<usize> = (0..layout.files.len()).collect();
@@ -74,12 +76,15 @@ pub fn build_minimap(
             .chunks(chunk)
             .map(|part| {
                 let layout = &*layout;
+                let src_of = Source {
+                    layout,
+                    sources,
+                    palette,
+                    overlay,
+                };
                 s.spawn(move || {
                     part.iter()
-                        .map(|&(f, x, y, w, h)| {
-                            let img = raster_file(layout, sources, palette, f, w, h, texel);
-                            (f, x, y, w, img)
-                        })
+                        .map(|&(f, x, y, w, h)| (f, x, y, w, raster_file(src_of, f, w, h, texel)))
                         .collect()
                 })
             })
@@ -110,19 +115,28 @@ pub fn build_minimap(
     )
 }
 
-fn raster_file(
-    layout: &Layout,
-    sources: &[SourceFile],
-    palette: &[[f32; 3]],
-    f: usize,
-    w: usize,
-    h: usize,
-    texel: f32,
-) -> Vec<u32> {
+/// Everything a file's minimap is rasterised from, other than its own size.
+#[derive(Clone, Copy)]
+struct Source<'a> {
+    layout: &'a Layout,
+    sources: &'a [SourceFile],
+    palette: &'a [[f32; 3]],
+    overlay: &'a Overlay,
+}
+
+fn raster_file(src_of: Source, f: usize, w: usize, h: usize, texel: f32) -> Vec<u32> {
+    let Source {
+        layout,
+        sources,
+        palette,
+        overlay,
+    } = src_of;
     let node = &layout.files[f];
     let src = &sources[node.file];
+    let marks = mark_palette();
     let mut acc = vec![[0f32; 4]; w * h];
     for i in 0..src.line_count() {
+        let mark = overlay.mark(node.file, i);
         let (x0, z0) = node.char_pos(i);
         let (x0, z0) = (x0 - node.tile.x, z0 - node.tile.z);
         let ty = 1 + ((z0 + LINE_H * 0.5) / texel) as usize;
@@ -133,7 +147,11 @@ fn raster_file(
             }
             let tx = 1 + ((x0 + c as f32 + 0.5) / texel) as usize;
             let a = &mut acc[ty.min(h - 1) * w + tx.min(w - 1)];
-            let p = palette[k as usize];
+            let p = if mark == M_NONE {
+                palette[k as usize]
+            } else {
+                marks[mark as usize]
+            };
             a[0] += p[0];
             a[1] += p[1];
             a[2] += p[2];
