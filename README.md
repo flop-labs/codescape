@@ -190,6 +190,29 @@ variable itself counts as somewhere a change can come from. On
 every step and lighting 3 — the last of which is the `paidNaiveEscape' = true`
 that breaks the invariant.
 
+A counterexample is as short as Quint can make it — six states here. For a
+long run to watch, simulate without an invariant, which keeps a random walk of
+`--max-steps` states (status `ok`, not `violation`), and raise the playback
+rate from its default of one step per 1.6 s with `--trace-rate` (steps per
+second):
+
+```sh
+quint run formal-specs/channel/channel-payout-liveness.qnt \
+  --max-steps=600 --max-samples=1 --seed=7 --backend=rust --out-itf=/tmp/long.itf.json
+cargo run --release -- --trace /tmp/long.itf.json --trace-rate 60
+```
+
+With `--trace`, `--record DIR` records the trace instead of the tour: it
+plays the trace once at `--trace-rate`, holds the last state for 1.5 s and
+exits. 600 steps at 60 a second make an 11.5 s video (frames are PNG on
+macOS; under X11 they are `f%05d.xwd`):
+
+```sh
+cargo run --release -- --trace /tmp/long.itf.json --trace-rate 60 --record /tmp/frames
+ffmpeg -framerate 30 -i /tmp/frames/f%05d.png -vf scale=1920:-2 \
+  -c:v libx264 -pix_fmt yuv420p -crf 20 trace.mp4
+```
+
 Trace marks live only in the near, glyph layer. The minimap atlas is rasterised
 once at load, so baking a step into it would freeze that step into the far
 view; diff marks, which do not change during a run, are baked into both.

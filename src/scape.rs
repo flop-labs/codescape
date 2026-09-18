@@ -411,6 +411,8 @@ struct Options {
     pr: Option<u32>,
     /// A Quint ITF counterexample to step through on the spec that produced it.
     trace: Option<PathBuf>,
+    /// Trace steps per second; unset keeps the default hold per step.
+    trace_rate: Option<f64>,
 }
 
 impl Options {
@@ -434,6 +436,12 @@ impl Options {
                 "--diff" => o.diff = args.next(),
                 "--pr" => o.pr = args.next().and_then(|v| v.parse().ok()),
                 "--trace" => o.trace = args.next().map(PathBuf::from),
+                "--trace-rate" => {
+                    o.trace_rate = args
+                        .next()
+                        .and_then(|v| v.parse().ok())
+                        .filter(|r: &f64| *r > 0.0)
+                }
                 "--at" => o.at = args.next().and_then(|v| v.parse().ok()),
                 "--shot" => o.shot = args.next().map(PathBuf::from),
                 "--atlas" => {
@@ -446,7 +454,9 @@ impl Options {
         if o.at.is_some() {
             o.tour = true;
         }
-        if o.record.is_some() {
+        // A trace records its own playback, parked on the spec; anything else
+        // records the tour.
+        if o.record.is_some() && o.trace.is_none() {
             o.tour = true;
             o.exit_after_tour = true;
         }
@@ -677,6 +687,11 @@ impl CodeScape {
         if let Some(t) = tile {
             self.cam = reading_view(&scene.layout, t, height);
         }
+        if let Some(rate) = self.opts.trace_rate {
+            trace.step_secs = 1.0 / rate;
+        }
+        // A recording plays the trace once and ends with it.
+        trace.looping = self.opts.record.is_none();
         self.trace = Some(trace);
         self.apply_trace();
     }
@@ -842,7 +857,8 @@ impl CodeScape {
         } else {
             dt
         };
-        if self.opts.record.is_some() && self.frame_index <= 3 {
+        let settling = self.opts.record.is_some() && self.frame_index <= 3;
+        if settling {
             // Let the first frames settle before the tour clock starts.
         } else if let Some(tour) = &mut self.tour {
             match tour.advance(step) {
@@ -855,7 +871,12 @@ impl CodeScape {
                 }
             }
         }
-        self.advance_trace(dt);
+        if !settling {
+            self.advance_trace(step);
+        }
+        if self.opts.record.is_some() && self.trace.as_ref().is_some_and(|t| t.finished()) {
+            cx.quit();
+        }
         if let Some((from, to, start, secs)) = self.fly {
             let start = start.unwrap_or(time);
             self.fly = Some((from, to, Some(start), secs));

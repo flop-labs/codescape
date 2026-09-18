@@ -1,7 +1,8 @@
 //! codescape: fly through a git repository's source in 3D.
 //!
 //! Usage: codescape [REPO] [--diff REV|RANGE] [--pr N] [--tour] [--loop]
-//!                  [--record DIR] [--record-fps N] [--atlas N]
+//!                  [--trace ITF [--trace-rate N]] [--record DIR] [--record-fps N]
+//!                  [--atlas N]
 
 mod app;
 mod scape;

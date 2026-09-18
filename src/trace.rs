@@ -253,10 +253,17 @@ pub struct Trace {
     pub playing: bool,
     /// Seconds spent on the current step.
     pub elapsed: f64,
+    /// Seconds each step is held during playback.
+    pub step_secs: f64,
+    /// Wrap to the first state after the last. A recording plays once instead.
+    pub looping: bool,
 }
 
-/// Seconds a step is held during playback.
+/// Seconds a step is held during playback, unless `--trace-rate` says otherwise.
 pub const STEP_SECS: f64 = 1.6;
+
+/// How long a trace that plays once stays on its last state before it is done.
+pub const END_HOLD_SECS: f64 = 1.5;
 
 impl Trace {
     pub fn parse(text: &str) -> Option<Trace> {
@@ -296,6 +303,8 @@ impl Trace {
             step: 0,
             playing: true,
             elapsed: 0.0,
+            step_secs: STEP_SECS,
+            looping: true,
         })
     }
 
@@ -360,18 +369,33 @@ impl Trace {
         });
     }
 
-    /// Advances playback; returns true when the step changed.
+    /// Advances playback; returns true when the step changed. A fast rate can
+    /// take several steps in one frame, so the remainder carries over.
     pub fn tick(&mut self, dt: f64) -> bool {
-        if !self.playing || self.states.len() < 2 {
+        let n = self.states.len();
+        if !self.playing || n < 2 {
             return false;
         }
         self.elapsed += dt;
-        if self.elapsed < STEP_SECS {
+        let due = (self.elapsed / self.step_secs) as usize;
+        // Played once, the trace parks on its last state, and `elapsed` goes
+        // on to time the hold.
+        let steps = if self.looping {
+            due
+        } else {
+            due.min(n - 1 - self.step)
+        };
+        if steps == 0 {
             return false;
         }
-        self.elapsed = 0.0;
-        self.step = (self.step + 1) % self.states.len();
+        self.elapsed -= steps as f64 * self.step_secs;
+        self.step = (self.step + steps % n) % n;
         true
+    }
+
+    /// A trace that plays once is done after holding its last state.
+    pub fn finished(&self) -> bool {
+        !self.looping && self.step + 1 >= self.states.len() && self.elapsed >= END_HOLD_SECS
     }
 
     pub fn seek(&mut self, delta: isize) {
@@ -525,6 +549,46 @@ mod tests {
         let mut t = Trace::parse(&text).unwrap();
         assert!(!t.bind(&[]), "no sources can match");
         assert_eq!(t.file, None);
+    }
+
+    #[test]
+    fn a_fast_rate_takes_several_steps_per_frame() {
+        let text = std::fs::read_to_string(REAL).unwrap();
+        let mut t = Trace::parse(&text).unwrap();
+        // Twice as many steps as frames (64 and 32 a second, which are exact
+        // in binary): two steps a frame.
+        t.step_secs = 1.0 / 64.0;
+        assert!(t.tick(1.0 / 32.0));
+        assert_eq!(t.step, 2);
+        // The default rate holds each step, and wraps after the last.
+        t.step_secs = STEP_SECS;
+        t.step = t.states.len() - 1;
+        t.elapsed = 0.0;
+        assert!(!t.tick(1.0));
+        assert!(t.tick(1.0));
+        assert_eq!(t.step, 0);
+    }
+
+    #[test]
+    fn a_trace_played_once_parks_on_its_last_state_then_finishes() {
+        let text = std::fs::read_to_string(REAL).unwrap();
+        let mut t = Trace::parse(&text).unwrap();
+        let last = t.states.len() - 1;
+        t.looping = false;
+        t.step_secs = 0.1;
+        // One long frame runs past the end: it stops on the last state.
+        assert!(t.tick(10.0));
+        assert_eq!(t.step, last);
+        assert!(t.finished(), "held well past END_HOLD_SECS");
+
+        t.step = last - 1;
+        t.elapsed = 0.0;
+        assert!(t.tick(0.1));
+        assert_eq!(t.step, last);
+        assert!(!t.finished(), "just arrived; the hold has not run");
+        assert!(!t.tick(END_HOLD_SECS));
+        assert_eq!(t.step, last);
+        assert!(t.finished());
     }
 
     #[test]
