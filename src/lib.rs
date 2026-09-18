@@ -6,8 +6,10 @@
 
 pub mod atlas;
 pub mod camera;
+pub mod capture;
 pub mod diff;
 pub mod layout;
+pub mod mem;
 pub mod overlay;
 pub mod scan;
 pub mod scene;

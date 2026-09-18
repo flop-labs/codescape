@@ -8,24 +8,10 @@
 //! Usage: bench [REPO] [--repeat N] [--frames N] [--atlas N] [--width W] [--height H]
 
 use codescape::{
-    atlas, diff, layout::Layout, overlay::Overlay, scan, scene, tour::Tour, trace::Trace,
+    atlas, diff, layout::Layout, mem, overlay::Overlay, scan, scene, tour::Tour, trace::Trace,
 };
 use std::path::PathBuf;
 use std::time::Instant;
-
-fn kb(key: &str) -> usize {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with(key))?
-                .split_whitespace()
-                .nth(1)?
-                .parse()
-                .ok()
-        })
-        .unwrap_or(0)
-}
 
 fn mb(bytes: usize) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
@@ -291,9 +277,12 @@ fn main() {
         mb(worst_glyphs * scene::GLYPH_SLOTS * 4),
         1000.0 / worst_ms.max(1e-6)
     );
-    println!(
-        "memory          {:.0} MB resident now, {:.0} MB peak",
-        mb(kb("VmRSS:") * 1024),
-        mb(kb("VmHWM:") * 1024)
-    );
+    match mem::resident() {
+        Some(r) => println!(
+            "memory          {:.0} MB resident now, {:.0} MB peak",
+            mb(r.now),
+            mb(r.peak)
+        ),
+        None => println!("memory          not readable on this platform"),
+    }
 }

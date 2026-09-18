@@ -47,7 +47,10 @@ Makepad declares its own FFI, so no C headers are involved: the only thing
 those packages contribute to the build is the unversioned `libX.so` symlink
 that `-lX` resolves through. `libgl-dev` and `libegl-dev` are not needed —
 nothing links against GL, which is resolved at runtime through `libGL.so.1`.
-macOS and Windows need no system packages.
+macOS and Windows need no system packages. macOS does need an accepted Xcode
+license, because every link goes through `xcrun`; after an Xcode update the
+build fails at the first build script until `sudo xcodebuild -license accept`
+has been run.
 
 ### Away from Linux, the far view aliases
 
@@ -59,6 +62,15 @@ covers a whole file. Reading distance is unaffected — the glyph layer does not
 use the minimap — so stepping a Quint trace, which parks on a single spec,
 looks the same everywhere. Fixing it properly means teaching the Metal backend
 that format; Metal supports mipmaps natively.
+
+The backends also differ on depth. Makepad's X11 window asks EGL for no depth
+buffer, so on Linux the scene simply paints in draw order. The Metal window
+has a real one, cleared to 1.0 and tested less-or-equal, and every Makepad 2D
+draw writes depth near 0.5. That is why the window background in `app.rs` is
+a pass clear colour rather than a drawn `draw_bg`: a drawn background writes
+0.5 across the whole window, the scene's remapped depth sits close to 1.0
+for everything but the nearest few percent of the view, and on Metal the
+entire map is hidden behind it — the HUD draws, the map does not.
 
 The renderer-free core cross-checks for macOS without an SDK, which is the
 cheapest guard against breaking it:
@@ -102,16 +114,21 @@ average line is over 240 characters.
 ## Recording
 
 `--record DIR` runs the tour at a fixed step (`--record-fps`, default 30). It
-saves one `xwd` screenshot of the window per frame and exits when the tour
+saves one screenshot of the window per frame and exits when the tour
 ends, so the video stays smooth however fast the machine renders.
 `--at SECONDS --shot FILE` saves a single frame from that point in the tour.
-Both call `xwd`, so they need an X server; Xvfb with Mesa llvmpipe works:
+On Linux both call `xwd`, so they need an X server; Xvfb with Mesa llvmpipe works:
 
 ```sh
 Xvfb :99 -screen 0 2400x1400x24 & export DISPLAY=:99
 target/release/codescape --record /tmp/frames
 ffmpeg -framerate 30 -i /tmp/frames/f%05d.xwd -c:v libx264 -pix_fmt yuv420p -crf 20 codescape.mp4
 ```
+
+On macOS they call `screencapture` on the window instead and write PNG
+(`f%05d.png`). The terminal that launches the tool needs Screen Recording
+permission, and the screen must be awake and unlocked — a locked screen
+captures as black.
 
 ## Diff: what a change touches
 

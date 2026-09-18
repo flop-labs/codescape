@@ -10,8 +10,9 @@ live_design! {
         ui: <Root> {
             main_window = <Window> {
                 window: { title: "FLOP codescape", inner_size: vec2(1920, 1080) }
-                show_bg: true
-                draw_bg: { color: #0A1128 }
+                // A clear, not a drawn background: a drawn one writes depth
+                // in front of the scene, which pins itself to the far plane.
+                pass: { clear_color: #0A1128 }
                 body = <View> {
                     width: Fill, height: Fill
                     scape = <CodeScape> {}

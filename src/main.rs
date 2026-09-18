@@ -7,7 +7,7 @@ mod app;
 mod scape;
 
 // Re-exported at the crate root so the renderer can keep saying `crate::`.
-pub use codescape::{atlas, camera, diff, layout, overlay, scan, scene, tour, trace};
+pub use codescape::{atlas, camera, capture, diff, layout, overlay, scan, scene, tour, trace};
 
 /// Why the X display is unusable, if it is. Makepad opens it before any of
 /// our code runs and segfaults rather than reporting a failure, so the two

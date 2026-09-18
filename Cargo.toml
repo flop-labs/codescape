@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 description = "Fly through the flop-core source tree in 3D (Makepad, GPU-rendered)"
+# `bench` is a second binary, so plain `cargo run` needs to be told which.
+default-run = "codescape"
 
 [dependencies]
 # Optional so the core library, its tests and the benchmark build on machines

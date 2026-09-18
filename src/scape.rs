@@ -7,6 +7,7 @@
 
 use crate::atlas::{self, Image};
 use crate::camera::{v3, Camera, View, V3};
+use crate::capture::Grab;
 use crate::diff;
 use crate::layout::Layout;
 use crate::overlay::{FileState, Overlay};
@@ -470,6 +471,62 @@ fn git(root: &std::path::Path, args: &[&str]) -> String {
 /// alias, because one quad covers a whole file — but the tool runs.
 const MIPMAP_UPLOAD: bool = cfg!(target_os = "linux");
 
+const WINDOW_TITLE: &str = "FLOP codescape";
+
+/// How this platform saves a frame of the window, if it can.
+fn grab() -> Option<Grab> {
+    #[cfg(target_os = "macos")]
+    {
+        let found = window_number().map(Grab::ScreenCapture);
+        if found.is_none() {
+            log!("codescape: no window titled {WINDOW_TITLE:?} to capture");
+        }
+        found
+    }
+    #[cfg(not(target_os = "macos"))]
+    Some(Grab::Xwd)
+}
+
+/// The number of our window, which is what `screencapture -l` takes. Makepad
+/// also keeps an untitled helper window, so match on the title, as xwd does.
+#[cfg(target_os = "macos")]
+fn window_number() -> Option<u32> {
+    use makepad_widgets::makepad_platform::makepad_objc_sys::{
+        class, msg_send, runtime::Object, sel, sel_impl,
+    };
+    use std::ffi::{c_char, CStr};
+    // SAFETY: plain AppKit getters on the main thread, which is where Makepad
+    // delivers the events this is called from.
+    unsafe {
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let windows: *mut Object = msg_send![app, windows];
+        let count: usize = msg_send![windows, count];
+        for i in 0..count {
+            let w: *mut Object = msg_send![windows, objectAtIndex: i];
+            let title: *mut Object = msg_send![w, title];
+            if title.is_null() {
+                continue;
+            }
+            let utf8: *const c_char = msg_send![title, UTF8String];
+            if !utf8.is_null() && CStr::from_ptr(utf8).to_bytes() == WINDOW_TITLE.as_bytes() {
+                let n: isize = msg_send![w, windowNumber];
+                return u32::try_from(n).ok();
+            }
+        }
+    }
+    None
+}
+
+fn save_frame(g: Grab, path: &Path) {
+    let ok = g
+        .command(WINDOW_TITLE, path)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        log!("codescape: could not save {}", path.display());
+    }
+}
+
 fn upload(cx: &mut Cx, img: Image, mips: bool) -> Texture {
     let format = if mips && MIPMAP_UPLOAD {
         TextureFormat::VecMipBGRAu8_32 {
@@ -760,10 +817,9 @@ impl CodeScape {
         if let Some(shot) = self.opts.shot.clone() {
             self.frame_index += 1;
             if self.frame_index == 8 {
-                let _ = std::process::Command::new("xwd")
-                    .args(["-name", "FLOP codescape", "-silent", "-out"])
-                    .arg(shot)
-                    .status();
+                if let Some(g) = grab() {
+                    save_frame(g, &shot);
+                }
                 cx.quit();
             }
             self.area.redraw(cx);
@@ -774,11 +830,10 @@ impl CodeScape {
             // Capture the frame presented before this tick, then advance the
             // tour by a fixed step so the video is smooth at any render speed.
             if self.frame_index > 2 {
-                let path = dir.join(format!("f{:05}.xwd", self.frame_index - 3));
-                let _ = std::process::Command::new("xwd")
-                    .args(["-name", "FLOP codescape", "-silent", "-out"])
-                    .arg(path)
-                    .status();
+                if let Some(g) = grab() {
+                    let name = format!("f{:05}.{}", self.frame_index - 3, g.extension());
+                    save_frame(g, &dir.join(name));
+                }
             }
             self.frame_index += 1;
         }
