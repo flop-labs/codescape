@@ -54,14 +54,37 @@ has been run.
 
 ### Away from Linux, the far view aliases
 
-Makepad implements its mipmapped upload format (`VecMipBGRAu8_32`) in the
-OpenGL backend only; the Metal and DX11 paths fall through to a `panic!()` on
-it. So on macOS and Windows the minimap goes up unmipped: the tool runs and
-logs a line saying so, but tiles minified at distance alias, because one quad
-covers a whole file. Reading distance is unaffected — the glyph layer does not
-use the minimap — so stepping a Quint trace, which parks on a single spec,
-looks the same everywhere. Fixing it properly means teaching the Metal backend
-that format; Metal supports mipmaps natively.
+This is a property of the Makepad release pinned here, `makepad-platform`
+1.0.0 from crates.io, not of Makepad. In 1.0.0 the mipmapped upload format
+(`VecMipBGRAu8_32`) is implemented in the OpenGL backend only: Metal's
+`update_vec_texture` ends in `_=>panic!()`, and its MSL sampler is built
+`sampler(mag_filter::linear, min_filter::linear)`, with no mip filter to
+sample a chain with. So on macOS the minimap goes up unmipped: the tool runs
+and logs a line saying so, but tiles minified at distance alias, because one
+quad covers a whole file. Reading distance is unaffected — the glyph layer
+does not use the minimap — so stepping a Quint trace, which parks on a single
+spec, looks the same everywhere.
+
+Makepad itself has the whole path on `dev`, and has had most of it for a
+while: `73d9972` (2026-03-09, "mipmapping") added the Metal per-level upload
+and the `mip_filter::linear` sampler, and #1127 (2026-07-21) added mip chains
+for decoded images and fixed Metal's missing `VecMipBGRAu8_32` upload arm,
+which until then allocated levels without filling them. Lifting
+`MIPMAP_UPLOAD` in `src/scape.rs` therefore waits on moving off the 1.0.0
+release, not on an upstream fix.
+
+Upstream's remaining gap is a policy one and does not apply here: decoded
+images only request mipmaps on Linux by default (`image_cache_use_mipmaps`,
+overridable with `MAKEPAD_IMAGE_MIPMAPS=1`), because on Apple the chain is
+built on the CPU during decode and costs about a third more texture memory.
+The minimap is not a decoded image — it is rasterised here and uploaded as an
+explicit mip texture — so it is unaffected by that default either way.
+
+Measured on an M3 Max, that costs quality but not use. Comparing consecutive
+recorded frames of the overview, tile rims, directory labels and the colour of
+each district hold still, while the texel pattern inside a tile changes from
+frame to frame, so the map twinkles under motion. The shape of the repository
+still reads from altitude.
 
 The backends also differ on depth. Makepad's X11 window asks EGL for no depth
 buffer, so on Linux the scene simply paints in draw order. The Metal window
@@ -126,9 +149,12 @@ ffmpeg -framerate 30 -i /tmp/frames/f%05d.xwd -c:v libx264 -pix_fmt yuv420p -crf
 ```
 
 On macOS they call `screencapture` on the window instead and write PNG
-(`f%05d.png`). The terminal that launches the tool needs Screen Recording
-permission, and the screen must be awake and unlocked — a locked screen
-captures as black.
+(`f%05d.png`). Screen Recording permission belongs to whichever process
+launched the tool, and every frame fails with "could not create image from
+window" until that process has it — granting it to the binary itself does
+nothing, because it is not an application bundle. Launch from a terminal that
+already has the permission. The screen must also be awake and unlocked: a
+locked screen captures as black, and a sleeping display fails outright.
 
 ## Diff: what a change touches
 
@@ -260,6 +286,14 @@ flop-core with a diff overlay holds **1.9k–2.6k fps** at 4,604 tiles and 1k–
 glyphs, with the GPU at 89% and 32 W. Frame times of 0.4–0.5 ms mean the tool
 is nowhere near GPU-bound at this repo size; what grows is tile instances,
 linear in file count.
+
+On an M3 Max (macOS 26.6, Metal, 1512x886 pt at 2x) the same tour holds
+**115–128 fps**, which is the display's refresh rate: Makepad presents on
+vsync, so this is a floor, not a ceiling. At that rate the GPU reports about
+30% utilisation — a whole-device figure, so the tool's own share is lower —
+and one CPU core is about 22% busy. Resident memory is 1.35 GB: roughly
+750 MB of heap, 520 MB of GPU allocations (the 234 MB minimap atlas among
+them) and 62 MB of Retina drawables.
 
 To run it without a desktop session, a headless X server on the GPU works —
 the NVIDIA Xorg driver that ships with the 580 packages plus a config with

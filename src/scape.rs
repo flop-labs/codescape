@@ -475,10 +475,13 @@ fn git(root: &std::path::Path, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-/// Makepad implements the mipmapped upload format in its OpenGL backend only:
-/// the Metal and DX11 paths fall through to a `panic!()` on it. Elsewhere the
-/// minimap goes up unmipped, which costs far-view quality — minified tiles
-/// alias, because one quad covers a whole file — but the tool runs.
+/// `makepad-platform` 1.0.0, the release pinned here, implements the mipmapped
+/// upload format in its OpenGL backend only: Metal's `update_vec_texture` ends
+/// in `_=>panic!()`, and its sampler carries no mip filter either. Elsewhere
+/// the minimap goes up unmipped, which costs far-view quality — minified tiles
+/// alias, because one quad covers a whole file — but the tool runs. Makepad's
+/// `dev` has had the Metal path since `73d9972` (2026-03-09), so this gate
+/// goes away with the dependency, not with an upstream change.
 const MIPMAP_UPLOAD: bool = cfg!(target_os = "linux");
 
 const WINDOW_TITLE: &str = "FLOP codescape";
