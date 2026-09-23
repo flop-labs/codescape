@@ -324,18 +324,32 @@ and one CPU core is about 22% busy. Resident memory is 1.35 GB: roughly
 them) and 62 MB of Retina drawables. Those numbers were measured on the
 1.0.0 build. Re-measured on the same machine after the move to Makepad from
 git, with both builds flying the tour: load time is unchanged (0.66 s against
-0.69 s), the process holds 1.22 GB resident against 1.09 GB, and its physical
-footprint is 1.8 GB against 1.3 GB, peaking at 2.3 GB during the upload. The
-difference is the CPU-side mip chain (about 90 MB), Makepad 2.0's larger
-runtime (28 threads against 10, 685 MB against 478 MB of live heap), and about
-320 MB of staging buffers that Makepad frees after the upload but malloc keeps
-as empty pages. The renderer-free `bench` numbers are identical between the
-two builds. On the looping tour, read off the HUD four times per run over two
+0.69 s), and the process holds 0.98 GB resident against 1.09 GB. Its physical
+footprint is 1.3 GB for both, peaking at 2.0 GB during the upload against
+1.4 GB, but the two are not like for like: 2.0 keeps textures in private GPU
+storage, which the footprint no longer counts (about 330 MB here). The atlas is
+allocated with room for its CPU-built mip chain, so building the chain does not
+copy it; before that it did, and the footprint was 1.8 GB. The renderer-free
+`bench` numbers are identical between the two builds. On the looping tour, read off the HUD four times per run over two
 runs in opposite order, the 2.0 build held 120 fps, the panel's refresh rate,
 in every reading; the 1.0.0 build read 109–119 fps. Whole-device GPU
 utilisation, sampled once a second from the IOAccelerator counters, was
 23–30% for 2.0 against 28–37% for 1.0.0 in both runs; that figure includes
 every other app on the machine, so only the difference is meaningful.
+
+At this repository's size the tool is nowhere near either limit. Over a full
+tour loop the GPU spends 0.48 ms per frame at the median and 0.63 ms at p95,
+and under 0.9 ms in every second after start-up, against the 8.3 ms a 120 Hz
+frame allows. The main thread is busy 6% of the time, about 0.4 ms a frame,
+of which glyph collection is a tenth. To read these numbers yourself:
+
+```sh
+MAKEPAD_ATLAS_DIAGNOSTICS=1 MAKEPAD_TRACE=gpu.pass cargo run --release -- --tour --loop
+sample $(pgrep -n codescape) 30 1 -file /tmp/codescape.sample   # CPU, from another shell
+```
+
+The first prints GPU time per command buffer on stderr, and a per-second
+summary; the second is macOS's call-stack sampler.
 
 To run it without a desktop session, a headless X server on the GPU works —
 the NVIDIA Xorg driver that ships with the 580 packages plus a config with

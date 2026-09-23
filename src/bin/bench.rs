@@ -109,7 +109,7 @@ fn main() {
     let palette = scene::syntax_palette();
     let t = Instant::now();
     let (minimap, texel) =
-        atlas::build_minimap(&mut layout, &sources, &palette, &overlay, atlas_size);
+        atlas::build_minimap(&mut layout, &sources, &palette, &overlay, atlas_size, 0);
     let atlas_ms = t.elapsed().as_secs_f64() * 1e3;
     let atlas_bytes = minimap.width * minimap.height * 4;
     let atlas_dims = (minimap.width, minimap.height);

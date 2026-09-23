@@ -547,16 +547,20 @@ fn save_frame(g: Grab, path: &Path) {
 /// Highest mip level of the minimap: level 0 plus four halvings.
 const MIP_LEVELS: usize = 4;
 
+/// Metal uploads a CPU-built chain level by level and fills nothing past the
+/// data it is given; OpenGL and Vulkan generate the chain on the GPU from
+/// level 0 alone. Makepad draws the same line in its private
+/// `backend_uploads_cpu_mip_chain` (draw/src/image_cache.rs); re-check it when
+/// bumping the pin.
+const CPU_MIP_LEVELS: usize = if cfg!(target_vendor = "apple") {
+    MIP_LEVELS
+} else {
+    0
+};
+
 fn upload(cx: &mut Cx, mut img: Image, mips: bool) -> Texture {
     let format = if mips {
-        // Metal uploads a CPU-built chain level by level and fills nothing
-        // past the data it is given; OpenGL and Vulkan generate the chain on
-        // the GPU from level 0 alone. Makepad draws the same line in its
-        // private `backend_uploads_cpu_mip_chain` (draw/src/image_cache.rs);
-        // re-check it when bumping the pin.
-        if cfg!(target_vendor = "apple") {
-            atlas::append_mip_levels(&mut img, MIP_LEVELS);
-        }
+        atlas::append_mip_levels(&mut img, CPU_MIP_LEVELS);
         TextureFormat::VecMipBGRAu8_32 {
             width: img.width,
             height: img.height,
@@ -623,6 +627,7 @@ impl CodeScape {
             &palette,
             &overlay,
             self.opts.atlas_size,
+            CPU_MIP_LEVELS,
         );
         let ttf = self.bundled_font(cx).expect("bundled monospace font");
         let font = atlas::build_font(&ttf);
@@ -1052,10 +1057,18 @@ impl CodeScape {
                 scene.glyph_count,
                 l.files.len()
             )
-        } else {
+        } else if self.animating() {
             format!(
                 "{:>3.0} fps   {:>7} glyphs   {} tiles",
                 self.fps,
+                scene.glyph_count,
+                l.files.len()
+            )
+        } else {
+            // The counter only runs while something animates; between
+            // animations its last value would read as the frame rate.
+            format!(
+                "   idle   {:>7} glyphs   {} tiles",
                 scene.glyph_count,
                 l.files.len()
             )
@@ -1241,15 +1254,19 @@ impl Widget for CodeScape {
                     self.area.redraw(cx);
                 }
             }
-            Hit::FingerScroll(fs) => {
+            // Makepad 2.0 on macOS sends a zero-delta scroll for every trackpad
+            // contact (`ScrollPhase::Touched`), so plain pointer movement would
+            // otherwise zoom out towards the cursor. Only a real delta zooms.
+            Hit::FingerScroll(fs) if fs.scroll.x != 0.0 || fs.scroll.y != 0.0 => {
                 let amount = if fs.scroll.y != 0.0 {
                     fs.scroll.y
                 } else {
                     fs.scroll.x
                 } as f32;
                 // Wheels step per notch (Makepad's X11 speed curve is erratic);
-                // trackpads zoom continuously.
-                let f = if fs.device.is_mouse() {
+                // trackpads zoom continuously. 2.0 reports every scroll as a
+                // mouse, so tell them apart by phase: only a wheel has none.
+                let f = if matches!(fs.phase, makepad_widgets::event::ScrollPhase::None) {
                     if amount < 0.0 {
                         0.84
                     } else {
@@ -1332,6 +1349,9 @@ impl Widget for CodeScape {
             self.load(cx);
             self.last_time = 0.0;
             self.request_frame(cx);
+            // Keys (T, H, WASD) need focus; without this they only work
+            // after the first click into the map.
+            cx.set_key_focus(self.area);
         }
         let view = self.view();
         self.draw_scene(cx, &view);

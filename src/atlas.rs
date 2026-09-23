@@ -19,13 +19,16 @@ fn pack(c: [f32; 3], a: f32) -> u32 {
 
 /// Packs every file's minimap into one atlas no larger than `max_size`²,
 /// choosing the finest texel size (in world units) that fits. Writes each
-/// file's normalised uv rectangle into the layout.
+/// file's normalised uv rectangle into the layout. `mip_levels` reserves room
+/// for that many levels of [`append_mip_levels`], so building the chain later
+/// does not reallocate the atlas.
 pub fn build_minimap(
     layout: &mut Layout,
     sources: &[SourceFile],
     palette: &[[f32; 3]],
     overlay: &Overlay,
     max_size: usize,
+    mip_levels: usize,
 ) -> (Image, f32) {
     let mut order: Vec<usize> = (0..layout.files.len()).collect();
     order.sort_by(|a, b| {
@@ -62,7 +65,8 @@ pub fn build_minimap(
     }
     let width = max_size;
     let height = height.next_multiple_of(64);
-    let mut data = vec![0u32; width * height];
+    let mut data = Vec::with_capacity(width * height + mip_chain_extra(width, height, mip_levels));
+    data.resize(width * height, 0u32);
 
     // Rasterise files in parallel; each thread writes to its own buffers.
     let threads = std::thread::available_parallelism()
@@ -252,11 +256,25 @@ pub fn build_font(ttf: &[u8]) -> Image {
 
 /// Squared Euclidean distance to the nearest pixel where `mask == target`
 /// (Felzenszwalb & Huttenlocher lower envelope of parabolas).
+/// Texels that mip levels 1..=`levels` of a `width`x`height` image add.
+pub fn mip_chain_extra(width: usize, height: usize, levels: usize) -> usize {
+    let (mut w, mut h, mut extra) = (width, height, 0);
+    for _ in 0..levels {
+        (w, h) = ((w / 2).max(1), (h / 2).max(1));
+        extra += w * h;
+    }
+    extra
+}
+
 /// Appends mip levels 1..=`levels` to `img.data`, each a 2x2 box average of
 /// the level before, in the concatenated level-0-first layout a texture upload
 /// reads level by level. Texels are premultiplied, so a plain per-channel mean
 /// is the right filter. Odd edges repeat their last row or column.
 pub fn append_mip_levels(img: &mut Image, levels: usize) {
+    // A no-op when the atlas was built with room for the chain; otherwise it
+    // grows once to the exact size instead of doubling.
+    img.data
+        .reserve_exact(mip_chain_extra(img.width, img.height, levels));
     let (mut w, mut h, mut start) = (img.width, img.height, 0usize);
     for _ in 0..levels {
         let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
