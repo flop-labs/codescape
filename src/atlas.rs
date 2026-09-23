@@ -252,6 +252,39 @@ pub fn build_font(ttf: &[u8]) -> Image {
 
 /// Squared Euclidean distance to the nearest pixel where `mask == target`
 /// (Felzenszwalb & Huttenlocher lower envelope of parabolas).
+/// Appends mip levels 1..=`levels` to `img.data`, each a 2x2 box average of
+/// the level before, in the concatenated level-0-first layout a texture upload
+/// reads level by level. Texels are premultiplied, so a plain per-channel mean
+/// is the right filter. Odd edges repeat their last row or column.
+pub fn append_mip_levels(img: &mut Image, levels: usize) {
+    let (mut w, mut h, mut start) = (img.width, img.height, 0usize);
+    for _ in 0..levels {
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let mut next = Vec::with_capacity(nw * nh);
+        for y in 0..nh {
+            let (y0, y1) = ((y * 2).min(h - 1), (y * 2 + 1).min(h - 1));
+            for x in 0..nw {
+                let (x0, x1) = ((x * 2).min(w - 1), (x * 2 + 1).min(w - 1));
+                let at = |sx: usize, sy: usize| img.data[start + sy * w + sx];
+                next.push(average4([at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1)]));
+            }
+        }
+        start = img.data.len();
+        img.data.extend_from_slice(&next);
+        (w, h) = (nw, nh);
+    }
+}
+
+/// Per-channel mean of four 0xAARRGGBB texels, rounded to nearest.
+fn average4(t: [u32; 4]) -> u32 {
+    let mut out = 0;
+    for shift in [0, 8, 16, 24] {
+        let sum: u32 = t.iter().map(|v| (v >> shift) & 0xff).sum();
+        out |= ((sum + 2) / 4) << shift;
+    }
+    out
+}
+
 fn edt(mask: &[bool], w: usize, h: usize, target: bool) -> Vec<f64> {
     const INF: f64 = 1e20;
     let mut grid: Vec<f64> = mask
@@ -313,5 +346,39 @@ fn edt_1d(f: &[f64], d: &mut [f64], v: &mut [usize], z: &mut [f64]) {
         }
         let dq = q as f64 - v[k] as f64;
         d[q] = dq * dq + f[v[k]];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mip_levels_halve_and_average() {
+        // 4x2 of alternating black and white columns: every 2x2 block of
+        // level 0 averages to mid grey, and so does the 1x1 level after it.
+        let row = [0xFF000000, 0xFFFFFFFF, 0xFF000000, 0xFFFFFFFF];
+        let mut img = Image {
+            width: 4,
+            height: 2,
+            data: [row, row].concat(),
+        };
+        append_mip_levels(&mut img, 2);
+        assert_eq!(img.data.len(), 8 + 2 + 1);
+        assert_eq!(&img.data[8..], &[0xFF808080, 0xFF808080, 0xFF808080]);
+    }
+
+    #[test]
+    fn mip_levels_repeat_the_last_row_and_column() {
+        // 3x1: the block past the right edge and below the only row reads
+        // the edge texel again, so the mean is (a + b) / 2 per channel.
+        let mut img = Image {
+            width: 3,
+            height: 1,
+            data: vec![0x10203040, 0x30405060, 0xFFFFFFFF],
+        };
+        append_mip_levels(&mut img, 1);
+        assert_eq!(img.data.len(), 3 + 1);
+        assert_eq!(img.data[3], 0x20304050);
     }
 }

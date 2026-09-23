@@ -17,44 +17,54 @@ use crate::scene::{
 };
 use crate::tour::Tour;
 use crate::trace::Trace;
-use makepad_widgets::makepad_draw::geometry::GeometryCube3D;
 use makepad_widgets::*;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-live_design! {
-    use link::theme::*;
-    use link::shaders::*;
-    use link::widgets::*;
+script_mod! {
+    use mod.prelude.widgets.*
+    use mod.widgets.*
+    use mod.math.*
+    use mod.shader.*
+    use mod.draw
+    use mod.geom
 
-    pub DrawBox = {{DrawBox}} {
-        uniform vp0: vec4(1.0, 0.0, 0.0, 0.0)
-        uniform vp1: vec4(0.0, 1.0, 0.0, 0.0)
-        uniform vp2: vec4(0.0, 0.0, 1.0, 0.0)
-        uniform vp3: vec4(0.0, 0.0, 0.0, 1.0)
-        uniform focal_px: 1000.0
+    mod.draw.DrawBox = mod.std.set_type_default() do #(DrawBox::script_shader(vm)){
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
+        geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
 
-        fn clip(self, p: vec3) -> vec4 {
+        vp0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
+        vp1: uniform(vec4(0.0, 1.0, 0.0, 0.0))
+        vp2: uniform(vec4(0.0, 0.0, 1.0, 0.0))
+        vp3: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        focal_px: uniform(1000.0)
+
+        local: varying(vec3f)
+        face: varying(float)
+        cw: varying(float)
+
+        clip: fn(p: vec3) -> vec4 {
             return self.vp0 * p.x + self.vp1 * p.y + self.vp2 * p.z + self.vp3;
         }
-        varying local: vec3
-        varying face: float
-        varying cw: float
 
-        fn vertex(self) -> vec4 {
-            self.local = self.geom_pos + vec3(0.5, 0.5, 0.5);
+        vertex: fn() {
+            self.local = self.geom.geom_pos + vec3(0.5, 0.5, 0.5);
             let p = self.box_pos + self.local * self.box_size;
-            self.face = self.geom_id;
+            self.face = self.geom.geom_id;
             let c = self.clip(p);
             self.cw = c.w;
-            return vec4(c.x, c.y, (0.55 + 0.45 * c.z / c.w) * c.w, c.w);
+            self.vertex_pos = vec4(c.x, c.y, (0.55 + 0.45 * c.z / c.w) * c.w, c.w);
         }
 
-        fn fragment(self) -> vec4 {
-            return self.pixel();
+        fragment: fn() {
+            self.fb0 = self.pixel();
         }
 
-        fn pixel(self) -> vec4 {
+        pixel: fn() {
             let wpp = self.cw / self.focal_px;
             if self.face > 1.5 && self.face < 2.5 {
                 let ex = min(self.local.x, 1.0 - self.local.x) * self.box_size.x;
@@ -64,7 +74,7 @@ live_design! {
                 let k = 1.0 - smoothstep(rim * 0.5, rim, e);
                 return vec4(mix(self.top.rgb, self.rim.rgb, k), 1.0);
             }
-            let side = 0.5;
+            let mut side = 0.5;
             if self.face < 1.5 {
                 side = 0.62;
             }
@@ -74,43 +84,52 @@ live_design! {
         }
     }
 
-    pub DrawTile = {{DrawTile}} {
-        uniform vp0: vec4(1.0, 0.0, 0.0, 0.0)
-        uniform vp1: vec4(0.0, 1.0, 0.0, 0.0)
-        uniform vp2: vec4(0.0, 0.0, 1.0, 0.0)
-        uniform vp3: vec4(0.0, 0.0, 0.0, 1.0)
-        uniform focal_px: 1000.0
+    mod.draw.DrawTile = mod.std.set_type_default() do #(DrawTile::script_shader(vm)){
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
+        geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
 
-        fn clip(self, p: vec3) -> vec4 {
+        vp0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
+        vp1: uniform(vec4(0.0, 1.0, 0.0, 0.0))
+        vp2: uniform(vec4(0.0, 0.0, 1.0, 0.0))
+        vp3: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        focal_px: uniform(1000.0)
+
+        minimap: texture_2d(float)
+
+        tex: varying(vec2f)
+        lp: varying(vec2f)
+        cw: varying(float)
+
+        clip: fn(p: vec3) -> vec4 {
             return self.vp0 * p.x + self.vp1 * p.y + self.vp2 * p.z + self.vp3;
         }
-        texture minimap: texture2d
-        varying tex: vec2
-        varying lp: vec2
-        varying cw: float
 
-        fn vertex(self) -> vec4 {
+        vertex: fn() {
             let p = vec3(
-                self.tile.x + self.geom_pos.x * self.tile.z,
+                self.tile.x + self.geom.pos.x * self.tile.z,
                 self.elev,
-                self.tile.y + self.geom_pos.y * self.tile.w
+                self.tile.y + self.geom.pos.y * self.tile.w
             );
-            self.tex = mix(self.uv.xy, self.uv.zw, self.geom_pos);
-            self.lp = self.geom_pos * self.tile.zw;
+            self.tex = mix(self.uv.xy, self.uv.zw, self.geom.pos);
+            self.lp = self.geom.pos * self.tile.zw;
             let c = self.clip(p);
             self.cw = c.w;
-            return vec4(c.x, c.y, (0.55 + 0.45 * c.z / c.w - 0.00002) * c.w, c.w);
+            self.vertex_pos = vec4(c.x, c.y, (0.55 + 0.45 * c.z / c.w - 0.00002) * c.w, c.w);
         }
 
-        fn fragment(self) -> vec4 {
-            return self.pixel();
+        fragment: fn() {
+            self.fb0 = self.pixel();
         }
 
-        fn pixel(self) -> vec4 {
+        pixel: fn() {
             // Line height and world units per pixel, exact per fragment.
             let px = 2.0 * self.focal_px / self.cw;
             let wpp = self.cw / self.focal_px;
-            let s = sample2d(self.minimap, self.tex);
+            let s = self.minimap.sample_as_bgra(self.tex);
             let fade = mix(1.0, 1.0 - smoothstep(3.0, 7.0, px), self.state.y);
             let bg = self.bg.rgb + vec3(0.05, 0.06, 0.08) * self.state.x;
             let col = bg * (1.0 - s.a * fade) + s.rgb * fade;
@@ -124,39 +143,48 @@ live_design! {
         }
     }
 
-    pub DrawGlyph = {{DrawGlyph}} {
-        uniform vp0: vec4(1.0, 0.0, 0.0, 0.0)
-        uniform vp1: vec4(0.0, 1.0, 0.0, 0.0)
-        uniform vp2: vec4(0.0, 0.0, 1.0, 0.0)
-        uniform vp3: vec4(0.0, 0.0, 0.0, 1.0)
-        uniform focal_px: 1000.0
+    mod.draw.DrawGlyph = mod.std.set_type_default() do #(DrawGlyph::script_shader(vm)){
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        draw_call: uniform_buffer(draw.DrawCallUniforms)
+        draw_pass: uniform_buffer(draw.DrawPassUniforms)
+        draw_list: uniform_buffer(draw.DrawListUniforms)
+        geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
 
-        fn clip(self, p: vec3) -> vec4 {
+        vp0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
+        vp1: uniform(vec4(0.0, 1.0, 0.0, 0.0))
+        vp2: uniform(vec4(0.0, 0.0, 1.0, 0.0))
+        vp3: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        focal_px: uniform(1000.0)
+
+        font: texture_2d(float)
+
+        tex: varying(vec2f)
+        cw: varying(float)
+
+        clip: fn(p: vec3) -> vec4 {
             return self.vp0 * p.x + self.vp1 * p.y + self.vp2 * p.z + self.vp3;
         }
-        texture font: texture2d
-        varying tex: vec2
-        varying cw: float
 
-        fn vertex(self) -> vec4 {
+        vertex: fn() {
             let p = vec3(
-                self.gpos.x + self.geom_pos.x * self.gsize.x,
+                self.gpos.x + self.geom.pos.x * self.gsize.x,
                 self.gpos.y,
-                self.gpos.z + self.geom_pos.y * self.gsize.y
+                self.gpos.z + self.geom.pos.y * self.gsize.y
             );
-            self.tex = (self.cell + self.geom_pos) / vec2(16.0, 6.0);
+            self.tex = (self.cell + self.geom.pos) / vec2(16.0, 6.0);
             let c = self.clip(p);
             self.cw = c.w;
-            return vec4(c.x, c.y, (0.55 + 0.45 * c.z / c.w - 0.00005) * c.w, c.w);
+            self.vertex_pos = vec4(c.x, c.y, (0.55 + 0.45 * c.z / c.w - 0.00005) * c.w, c.w);
         }
 
-        fn fragment(self) -> vec4 {
-            return self.pixel();
+        fragment: fn() {
+            self.fb0 = self.pixel();
         }
 
-        fn pixel(self) -> vec4 {
+        pixel: fn() {
             let px = self.gsize.y * self.focal_px / self.cw;
-            let d = sample2d(self.font, self.tex).x;
+            let d = self.font.sample_as_bgra(self.tex).x;
             // SDF spread: 4 of the 64 texels per cell map onto 0.5 of range.
             let w = clamp(64.0 / max(px, 0.001) * 0.125 * 0.5, 0.02, 0.5);
             let a = smoothstep(0.5 - w, 0.5 + w, d) * smoothstep(self.fade.x, self.fade.y, px);
@@ -164,64 +192,51 @@ live_design! {
         }
     }
 
-    pub CodeScape = {{CodeScape}} {
-        width: Fill, height: Fill
-        font_file: dep("crate://makepad_widgets/resources/LiberationMono-Regular.ttf")
-        draw_panel: { color: #0A1128D8 }
-        draw_title: {
-            color: #00B4D8
-            text_style: <THEME_FONT_BOLD> { font_size: 15.0 }
+    mod.widgets.CodeScapeBase = #(CodeScape::register_widget(vm))
+
+    mod.widgets.CodeScape = set_type_default() do mod.widgets.CodeScapeBase{
+        width: Fill
+        height: Fill
+        font_file: crate_resource("makepad_widgets:resources/LiberationMono-Regular.ttf")
+        draw_box: mod.draw.DrawBox{}
+        draw_tile: mod.draw.DrawTile{}
+        draw_glyph: mod.draw.DrawGlyph{}
+        draw_panel: mod.draw.DrawColor{ color: #x0A1128D8 }
+        draw_title: mod.draw.DrawText{
+            color: #x00B4D8
+            text_style: theme.font_bold{ font_size: 15.0 }
         }
-        draw_text: {
-            color: #F5F7FA
-            text_style: <THEME_FONT_CODE> { font_size: 10.0 }
+        draw_text: mod.draw.DrawText{
+            color: #xF5F7FA
+            text_style: theme.font_code{ font_size: 10.0 }
         }
-        draw_dim: {
-            color: #A1A7AE
-            text_style: <THEME_FONT_CODE> { font_size: 9.0 }
+        draw_dim: mod.draw.DrawText{
+            color: #xA1A7AE
+            text_style: theme.font_code{ font_size: 9.0 }
         }
-        draw_caption: {
-            color: #F5F7FA
-            text_style: <THEME_FONT_BOLD> { font_size: 20.0 }
+        draw_caption: mod.draw.DrawText{
+            color: #xF5F7FA
+            text_style: theme.font_bold{ font_size: 20.0 }
         }
     }
 }
 
 macro_rules! draw_shader_impl {
     ($ty:ident) => {
-        impl LiveHook for $ty {
-            fn before_apply(
-                &mut self,
-                cx: &mut Cx,
-                apply: &mut Apply,
-                index: usize,
-                nodes: &[LiveNode],
-            ) {
-                self.draw_vars
-                    .before_apply_init_shader(cx, apply, index, nodes, &self.geometry);
-            }
-            fn after_apply(
-                &mut self,
-                cx: &mut Cx,
-                apply: &mut Apply,
-                index: usize,
-                nodes: &[LiveNode],
-            ) {
-                self.draw_vars
-                    .after_apply_update_self(cx, apply, index, nodes, &self.geometry);
-            }
-        }
-
         #[allow(dead_code)]
         impl $ty {
             pub fn begin(&mut self, cx: &mut Cx2d, view: &View) {
                 let m = &view.view_proj;
-                self.draw_vars.set_uniform(cx, id!(vp0), &m[0..4]);
-                self.draw_vars.set_uniform(cx, id!(vp1), &m[4..8]);
-                self.draw_vars.set_uniform(cx, id!(vp2), &m[8..12]);
-                self.draw_vars.set_uniform(cx, id!(vp3), &m[12..16]);
                 self.draw_vars
-                    .set_uniform(cx, id!(focal_px), &[view.focal_px]);
+                    .set_uniform(cx.cx.cx, live_id!(vp0), &m[0..4]);
+                self.draw_vars
+                    .set_uniform(cx.cx.cx, live_id!(vp1), &m[4..8]);
+                self.draw_vars
+                    .set_uniform(cx.cx.cx, live_id!(vp2), &m[8..12]);
+                self.draw_vars
+                    .set_uniform(cx.cx.cx, live_id!(vp3), &m[12..16]);
+                self.draw_vars
+                    .set_uniform(cx.cx.cx, live_id!(focal_px), &[view.focal_px]);
                 self.many_instances = cx.begin_many_instances(&self.draw_vars);
             }
             pub fn draw(&mut self) {
@@ -245,13 +260,11 @@ macro_rules! draw_shader_impl {
     };
 }
 
-#[derive(Live, LiveRegister)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawBox {
     #[rust]
     pub many_instances: Option<ManyInstances>,
-    #[live]
-    pub geometry: GeometryCube3D,
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
@@ -265,13 +278,11 @@ pub struct DrawBox {
 }
 draw_shader_impl!(DrawBox);
 
-#[derive(Live, LiveRegister)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawTile {
     #[rust]
     pub many_instances: Option<ManyInstances>,
-    #[live]
-    pub geometry: GeometryQuad2D,
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
@@ -290,13 +301,11 @@ pub struct DrawTile {
 }
 draw_shader_impl!(DrawTile);
 
-#[derive(Live, LiveRegister)]
+#[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawGlyph {
     #[rust]
     pub many_instances: Option<ManyInstances>,
-    #[live]
-    pub geometry: GeometryQuad2D,
     #[deref]
     pub draw_vars: DrawVars,
     #[live]
@@ -323,8 +332,12 @@ enum Drag {
     Orbit,
 }
 
-#[derive(Live, LiveHook, Widget)]
+#[derive(Script, ScriptHook, Widget)]
 pub struct CodeScape {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
     #[walk]
     walk: Walk,
     #[redraw]
@@ -347,7 +360,7 @@ pub struct CodeScape {
     #[live]
     draw_caption: DrawText,
     #[live]
-    font_file: LiveDependency,
+    font_file: Option<ScriptHandleRef>,
 
     #[rust]
     scene: Option<Scene>,
@@ -475,15 +488,6 @@ fn git(root: &std::path::Path, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-/// `makepad-platform` 1.0.0, the release pinned here, implements the mipmapped
-/// upload format in its OpenGL backend only: Metal's `update_vec_texture` ends
-/// in `_=>panic!()`, and its sampler carries no mip filter either. Elsewhere
-/// the minimap goes up unmipped, which costs far-view quality — minified tiles
-/// alias, because one quad covers a whole file — but the tool runs. Makepad's
-/// `dev` has had the Metal path since `73d9972` (2026-03-09), so this gate
-/// goes away with the dependency, not with an upstream change.
-const MIPMAP_UPLOAD: bool = cfg!(target_os = "linux");
-
 const WINDOW_TITLE: &str = "FLOP codescape";
 
 /// How this platform saves a frame of the window, if it can.
@@ -540,13 +544,25 @@ fn save_frame(g: Grab, path: &Path) {
     }
 }
 
-fn upload(cx: &mut Cx, img: Image, mips: bool) -> Texture {
-    let format = if mips && MIPMAP_UPLOAD {
+/// Highest mip level of the minimap: level 0 plus four halvings.
+const MIP_LEVELS: usize = 4;
+
+fn upload(cx: &mut Cx, mut img: Image, mips: bool) -> Texture {
+    let format = if mips {
+        // Metal uploads a CPU-built chain level by level and fills nothing
+        // past the data it is given; OpenGL and Vulkan generate the chain on
+        // the GPU from level 0 alone. Makepad draws the same line in its
+        // private `backend_uploads_cpu_mip_chain` (draw/src/image_cache.rs);
+        // re-check it when bumping the pin.
+        if cfg!(target_vendor = "apple") {
+            atlas::append_mip_levels(&mut img, MIP_LEVELS);
+        }
         TextureFormat::VecMipBGRAu8_32 {
             width: img.width,
             height: img.height,
             data: Some(img.data),
-            max_level: Some(4),
+            max_level: Some(MIP_LEVELS),
+            wrap: TextureWrap::ClampToEdge,
             updated: TextureUpdated::Full,
         }
     } else {
@@ -561,6 +577,19 @@ fn upload(cx: &mut Cx, img: Image, mips: bool) -> Texture {
 }
 
 impl CodeScape {
+    /// The monospace TTF the glyph atlas is rasterised from, declared in the
+    /// script as a `crate_resource` of `makepad_widgets` and read through the
+    /// script resource table (`Cx::load_script_resource` fills it on demand).
+    fn bundled_font(&self, cx: &mut Cx) -> Option<std::rc::Rc<Vec<u8>>> {
+        let res = self.font_file.as_ref()?;
+        let (heap_key, handle) = (res.heap_key(), res.as_handle());
+        if let Some(data) = cx.get_resource(heap_key, handle) {
+            return Some(data);
+        }
+        cx.load_script_resource(heap_key, handle);
+        cx.get_resource(heap_key, handle)
+    }
+
     fn load(&mut self, cx: &mut Cx) {
         let t0 = Instant::now();
         let root = self.opts.repo.clone().unwrap_or_else(|| {
@@ -595,16 +624,8 @@ impl CodeScape {
             &overlay,
             self.opts.atlas_size,
         );
-        let ttf = cx
-            .get_dependency(self.font_file.as_str())
-            .expect("bundled monospace font");
+        let ttf = self.bundled_font(cx).expect("bundled monospace font");
         let font = atlas::build_font(&ttf);
-        if !MIPMAP_UPLOAD {
-            log!(
-                "codescape: this platform has no mipmapped texture upload in makepad, \
-                 so the minimap is unmipped and the far view will alias"
-            );
-        }
         let minimap = upload(cx, minimap, true);
         let font = upload(cx, font, false);
         self.draw_tile.draw_vars.set_texture(0, &minimap);

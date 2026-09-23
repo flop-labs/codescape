@@ -10,7 +10,12 @@ default-run = "codescape"
 [dependencies]
 # Optional so the core library, its tests and the benchmark build on machines
 # without X11/ALSA/PulseAudio development headers.
-makepad-widgets = { version = "1.0.0", optional = true }
+#
+# Makepad is not published to crates.io any more (1.0.0 there is a dead end whose Metal
+# backend cannot upload mip chains). Track `dev`, pinned because Cargo.lock is not
+# committed. Pinned 2026-09-22 at dev HEAD. To bump: `git ls-remote https://github.com/makepad/makepad dev`,
+# put the new sha here, rebuild, re-run the checks in README.
+makepad-widgets = { git = "https://github.com/makepad/makepad", rev = "88639f79a2365081285529f1d5138416be8fdd60", optional = true }
 fontdue = "0.9"
 
 [features]

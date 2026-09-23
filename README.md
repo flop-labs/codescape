@@ -52,41 +52,69 @@ license, because every link goes through `xcrun`; after an Xcode update the
 build fails at the first build script until `sudo xcodebuild -license accept`
 has been run.
 
-### Away from Linux, the far view aliases
+### Makepad comes from git
 
-This is a property of the Makepad release pinned here, `makepad-platform`
-1.0.0 from crates.io, not of Makepad. In 1.0.0 the mipmapped upload format
-(`VecMipBGRAu8_32`) is implemented in the OpenGL backend only: Metal's
-`update_vec_texture` ends in `_=>panic!()`, and its MSL sampler is built
-`sampler(mag_filter::linear, min_filter::linear)`, with no mip filter to
-sample a chain with. So on macOS the minimap goes up unmipped: the tool runs
-and logs a line saying so, but tiles minified at distance alias, because one
-quad covers a whole file. Reading distance is unaffected — the glyph layer
-does not use the minimap — so stepping a Quint trace, which parks on a single
-spec, looks the same everywhere.
+The renderer builds against Makepad from its `dev` branch. Makepad is not
+published to crates.io any more, so the 1.0.0 release sitting there is a dead
+end. `Cargo.toml` pins an explicit revision —
+`88639f79a2365081285529f1d5138416be8fdd60`, the `dev` head on 2026-09-22 —
+rather than tracking the branch itself, because `**/Cargo.lock` is gitignored
+across this repository: a `branch = "dev"` dependency would resolve to
+whatever `dev` happened to be on every fresh checkout and in CI.
 
-Makepad itself has the whole path on `dev`, and has had most of it for a
-while: `73d9972` (2026-03-09, "mipmapping") added the Metal per-level upload
-and the `mip_filter::linear` sampler, and #1127 (2026-07-21) added mip chains
-for decoded images and fixed Metal's missing `VecMipBGRAu8_32` upload arm,
-which until then allocated levels without filling them. Lifting
-`MIPMAP_UPLOAD` in `src/scape.rs` therefore waits on moving off the 1.0.0
-release, not on an upstream fix.
+To move to a newer Makepad, read the branch head:
 
-Upstream's remaining gap is a policy one and does not apply here: decoded
-images only request mipmaps on Linux by default (`image_cache_use_mipmaps`,
+```sh
+git ls-remote https://github.com/makepad/makepad dev   # or: work
+```
+
+Put that sha in the `rev` in `tools/codescape/Cargo.toml`, with the date in
+the comment beside it, rebuild, and re-run the checks in this README: `just
+verify-codescape`, `cargo build --release`, the Linux cross-check `cargo check
+--target x86_64-unknown-linux-gnu --bin codescape`, and a run of the app.
+`dev` is the default branch and it moves fast.
+
+### The minimap is mipmapped on macOS and Linux
+
+The minimap atlas goes up as an explicit mip chain (`VecMipBGRAu8_32`,
+`max_level` 4) on macOS and Linux, so a tile minified at distance — one quad
+covers a whole file — samples a filtered level rather than aliasing. The
+mipmapped upload was Linux-only until the pin moved: the 1.0.0 release on
+crates.io panicked on this upload format in its Metal backend, so the minimap
+went up unmipped on macOS and the far view aliased there. Lifting that gate
+is why the pin moved off crates.io. Reading distance never depended on it
+either way — the near view draws glyphs from the font atlas, not from the
+minimap.
+
+The backends still split on who builds the levels. Metal uploads the chain
+level by level and fills nothing past the data it is given, so on Apple
+`atlas::append_mip_levels` box-filters levels 1 to 4 on the CPU before the
+upload (about 90 MB more for the full-size atlas). On Linux both backends
+generate the levels on the GPU from level 0 alone: OpenGL through
+`glGenerateMipmap`, Vulkan by blitting each level from the one above
+(`record_mip_chain` in `platform/src/os/linux/vulkan.rs`). Makepad draws the
+Apple-only line in its private `backend_uploads_cpu_mip_chain`, which is worth
+re-reading when bumping the pin. The D3D11 and WebGL backends still upload
+level 0 only at this revision, so on Windows and the web the far view would
+alias as it did on macOS before.
+
+![far view, two consecutive frames: unmipped above, mipmapped below](docs/mip-compare.png)
+
+Measured on an M3 Max by recording the opening overview of the tour with the
+1.0.0 build and with this one, cropping the same 480×180 strip of the far half
+of the map from frames 30 and 31 (the camera drifts slowly there) and comparing
+the two frames: RMSE 0.112 unmipped, 0.052 mipmapped, steady across every pair
+of frames checked. In the image above, the texel pattern inside the tiles
+changes from frame to frame on the top row and holds still on the bottom one.
+
+Upstream's one remaining mipmap policy does not apply here. Decoded images
+only request mipmaps on Linux by default (`image_cache_use_mipmaps`,
 overridable with `MAKEPAD_IMAGE_MIPMAPS=1`), because on Apple the chain is
 built on the CPU during decode and costs about a third more texture memory.
 The minimap is not a decoded image — it is rasterised here and uploaded as an
 explicit mip texture — so it is unaffected by that default either way.
 
-Measured on an M3 Max, that costs quality but not use. Comparing consecutive
-recorded frames of the overview, tile rims, directory labels and the colour of
-each district hold still, while the texel pattern inside a tile changes from
-frame to frame, so the map twinkles under motion. The shape of the repository
-still reads from altitude.
-
-The backends also differ on depth. Makepad's X11 window asks EGL for no depth
+The backends do differ on depth. Makepad's X11 window asks EGL for no depth
 buffer, so on Linux the scene simply paints in draw order. The Metal window
 has a real one, cleared to 1.0 and tested less-or-equal, and every Makepad 2D
 draw writes depth near 0.5. That is why the window background in `app.rs` is
@@ -293,7 +321,21 @@ vsync, so this is a floor, not a ceiling. At that rate the GPU reports about
 30% utilisation — a whole-device figure, so the tool's own share is lower —
 and one CPU core is about 22% busy. Resident memory is 1.35 GB: roughly
 750 MB of heap, 520 MB of GPU allocations (the 234 MB minimap atlas among
-them) and 62 MB of Retina drawables.
+them) and 62 MB of Retina drawables. Those numbers were measured on the
+1.0.0 build. Re-measured on the same machine after the move to Makepad from
+git, with both builds flying the tour: load time is unchanged (0.66 s against
+0.69 s), the process holds 1.22 GB resident against 1.09 GB, and its physical
+footprint is 1.8 GB against 1.3 GB, peaking at 2.3 GB during the upload. The
+difference is the CPU-side mip chain (about 90 MB), Makepad 2.0's larger
+runtime (28 threads against 10, 685 MB against 478 MB of live heap), and about
+320 MB of staging buffers that Makepad frees after the upload but malloc keeps
+as empty pages. The renderer-free `bench` numbers are identical between the
+two builds. On the looping tour, read off the HUD four times per run over two
+runs in opposite order, the 2.0 build held 120 fps, the panel's refresh rate,
+in every reading; the 1.0.0 build read 109–119 fps. Whole-device GPU
+utilisation, sampled once a second from the IOAccelerator counters, was
+23–30% for 2.0 against 28–37% for 1.0.0 in both runs; that figure includes
+every other app on the machine, so only the difference is meaningful.
 
 To run it without a desktop session, a headless X server on the GPU works —
 the NVIDIA Xorg driver that ships with the 580 packages plus a config with
