@@ -114,14 +114,13 @@ built on the CPU during decode and costs about a third more texture memory.
 The minimap is not a decoded image — it is rasterised here and uploaded as an
 explicit mip texture — so it is unaffected by that default either way.
 
-The backends do differ on depth. Makepad's X11 window asks EGL for no depth
-buffer, so on Linux the scene simply paints in draw order. The Metal window
-has a real one, cleared to 1.0 and tested less-or-equal, and every Makepad 2D
-draw writes depth near 0.5. That is why the window background in `app.rs` is
-a pass clear colour rather than a drawn `draw_bg`: a drawn background writes
-0.5 across the whole window, the scene's remapped depth sits close to 1.0
-for everything but the nearest few percent of the view, and on Metal the
-entire map is hidden behind it — the HUD draws, the map does not.
+The window backends differ on depth: X11 asks EGL for none, while Metal has a
+real buffer and Makepad's 2D draws write into it. The landscape does not rely
+on either one. `CodeScape` renders its boxes, tiles and glyphs into a child
+`DrawPass` with its own `DepthD32` texture, then composites the colour texture
+into the UI. The HUD draws last in that pass at normal 2D depth. Depth testing
+and the ordinary projection therefore behave the same on Metal, X11 and
+Wayland, while captures retain the complete frame.
 
 The renderer-free core cross-checks for macOS without an SDK, which is the
 cheapest guard against breaking it:
@@ -165,24 +164,19 @@ average line is over 240 characters.
 ## Recording
 
 `--record DIR` runs the tour at a fixed step (`--record-fps`, default 30). It
-saves one screenshot of the window per frame and exits when the tour
-ends, so the video stays smooth however fast the machine renders.
+saves one PNG read directly from the offscreen scene pass per frame and exits
+when the tour ends, so the video stays smooth however fast the machine renders.
 `--at SECONDS --shot FILE` saves a single frame from that point in the tour.
-On Linux both call `xwd`, so they need an X server; Xvfb with Mesa llvmpipe works:
+The readback runs in-process: neither mode invokes `xwd` or `screencapture`,
+needs Screen Recording permission, or depends on the display being awake and
+unlocked. On Linux capture selects Makepad's OpenGL renderer at startup because
+texture readback is not implemented by the pinned Vulkan renderer. A Wayland
+session, including a headless compositor, needs no X server or XWayland.
 
 ```sh
-Xvfb :99 -screen 0 2400x1400x24 & export DISPLAY=:99
 target/release/codescape --record /tmp/frames
-ffmpeg -framerate 30 -i /tmp/frames/f%05d.xwd -c:v libx264 -pix_fmt yuv420p -crf 20 codescape.mp4
+ffmpeg -framerate 30 -i /tmp/frames/f%05d.png -c:v libx264 -pix_fmt yuv420p -crf 20 codescape.mp4
 ```
-
-On macOS they call `screencapture` on the window instead and write PNG
-(`f%05d.png`). Screen Recording permission belongs to whichever process
-launched the tool, and every frame fails with "could not create image from
-window" until that process has it — granting it to the binary itself does
-nothing, because it is not an application bundle. Launch from a terminal that
-already has the permission. The screen must also be awake and unlocked: a
-locked screen captures as black, and a sleeping display fails outright.
 
 ## Diff: what a change touches
 
@@ -259,7 +253,7 @@ cargo run --release -- --trace /tmp/long.itf.json --trace-rate 60
 With `--trace`, `--record DIR` records the trace instead of the tour: it
 plays the trace once at `--trace-rate`, holds the last state for 1.5 s and
 exits. 600 steps at 60 a second make an 11.5 s video (frames are PNG on
-macOS; under X11 they are `f%05d.xwd`):
+every backend):
 
 ```sh
 cargo run --release -- --trace /tmp/long.itf.json --trace-rate 60 --record /tmp/frames

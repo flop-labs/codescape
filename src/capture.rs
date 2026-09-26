@@ -1,101 +1,66 @@
-//! Saving the window as an image, for `--shot` and `--record`.
-//!
-//! The renderer has no readback of its own, so a frame is saved by asking the
-//! platform's screenshot tool for the window. X11 names a window by its title;
-//! macOS needs the window number, which only the renderer can look up.
+//! Renderer-independent normalization for captured frames.
 
-use std::path::Path;
-use std::process::Command;
-
-/// A platform tool that saves one frame of the window.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Grab {
-    /// X11: `xwd` finds the window by title.
-    Xwd,
-    /// macOS: `screencapture` takes the window's number (its CGWindowID).
-    ScreenCapture(u32),
-}
-
-impl Grab {
-    /// The format the tool writes, as a file extension.
-    pub fn extension(self) -> &'static str {
-        match self {
-            Grab::Xwd => "xwd",
-            Grab::ScreenCapture(_) => "png",
-        }
+/// Converts a four-channel GPU readback into tightly packed, top-left-origin
+/// RGBA pixels. Returns `None` when the dimensions do not fit the supplied
+/// buffer.
+pub fn rgba_pixels(
+    width: usize,
+    height: usize,
+    stride: usize,
+    pixels: &[u8],
+    bgra: bool,
+    bottom_left: bool,
+) -> Option<Vec<u8>> {
+    let row_bytes = width.checked_mul(4)?;
+    if stride < row_bytes || stride.checked_mul(height)? > pixels.len() {
+        return None;
     }
-
-    /// The command that saves the window titled `title` to `out`.
-    pub fn command(self, title: &str, out: &Path) -> Command {
-        match self {
-            Grab::Xwd => {
-                let mut c = Command::new("xwd");
-                c.args(["-name", title, "-silent", "-out"]).arg(out);
-                c
-            }
-            Grab::ScreenCapture(window) => {
-                // -x: no shutter sound; -o: no drop shadow, so the image is
-                // the window's own pixels, as xwd gives.
-                let mut c = Command::new("screencapture");
-                c.args(["-x", "-o", "-l", &window.to_string()]).arg(out);
-                c
+    let len = row_bytes.checked_mul(height)?;
+    let mut rgba = vec![0; len];
+    for y in 0..height {
+        let src_y = if bottom_left { height - 1 - y } else { y };
+        let src = &pixels[src_y * stride..src_y * stride + row_bytes];
+        let dst = &mut rgba[y * row_bytes..(y + 1) * row_bytes];
+        dst.copy_from_slice(src);
+        if bgra {
+            for pixel in dst.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
             }
         }
     }
+    Some(rgba)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn argv(c: &Command) -> (String, Vec<String>) {
-        (
-            c.get_program().to_string_lossy().into_owned(),
-            c.get_args()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect(),
-        )
-    }
-
     #[test]
-    fn xwd_names_the_window_by_title() {
-        let c = Grab::Xwd.command("FLOP codescape", Path::new("/tmp/f00001.xwd"));
+    fn bgra_rows_are_swapped_and_tightened() {
         assert_eq!(
-            argv(&c),
-            (
-                "xwd".into(),
-                vec![
-                    "-name".into(),
-                    "FLOP codescape".into(),
-                    "-silent".into(),
-                    "-out".into(),
-                    "/tmp/f00001.xwd".into()
-                ]
-            )
+            rgba_pixels(
+                2,
+                2,
+                12,
+                &[3, 2, 1, 4, 7, 6, 5, 8, 0, 0, 0, 0, 11, 10, 9, 12, 15, 14, 13, 16, 0, 0, 0, 0,],
+                true,
+                false,
+            ),
+            Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
         );
     }
 
     #[test]
-    fn screencapture_names_the_window_by_number() {
-        let c = Grab::ScreenCapture(7739).command("FLOP codescape", Path::new("/tmp/shot.png"));
+    fn bottom_left_rows_are_flipped() {
         assert_eq!(
-            argv(&c),
-            (
-                "screencapture".into(),
-                vec![
-                    "-x".into(),
-                    "-o".into(),
-                    "-l".into(),
-                    "7739".into(),
-                    "/tmp/shot.png".into()
-                ]
-            )
+            rgba_pixels(1, 2, 4, &[1, 2, 3, 4, 5, 6, 7, 8], false, true),
+            Some(vec![5, 6, 7, 8, 1, 2, 3, 4])
         );
     }
 
     #[test]
-    fn frames_are_named_for_the_format_written() {
-        assert_eq!(Grab::Xwd.extension(), "xwd");
-        assert_eq!(Grab::ScreenCapture(1).extension(), "png");
+    fn rejects_short_or_narrow_buffers() {
+        assert_eq!(rgba_pixels(2, 1, 7, &[0; 8], false, false), None);
+        assert_eq!(rgba_pixels(2, 2, 8, &[0; 15], false, false), None);
     }
 }

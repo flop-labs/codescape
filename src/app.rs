@@ -13,9 +13,6 @@ script_mod! {
                 // 2.0 draws a title strip on macOS by default; 1.0 ran the
                 // scene full-height under the traffic lights.
                 show_caption_bar: false
-                // A clear, not a drawn background: a drawn one writes depth
-                // in front of the scene, which pins itself to the far plane.
-                pass +: { clear_color: #x0A1128 }
                 body +: {
                     scape := mod.widgets.CodeScape{
                         width: Fill

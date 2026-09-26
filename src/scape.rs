@@ -7,7 +7,7 @@
 
 use crate::atlas::{self, Image};
 use crate::camera::{v3, Camera, View, V3};
-use crate::capture::Grab;
+use crate::capture::rgba_pixels;
 use crate::diff;
 use crate::layout::Layout;
 use crate::overlay::{FileState, Overlay};
@@ -29,7 +29,18 @@ script_mod! {
     use mod.draw
     use mod.geom
 
+    mod.draw.DrawSceneTexture = mod.std.set_type_default() do #(DrawSceneTexture::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        scene_texture: texture_2d(float)
+
+        pixel: fn() {
+            return self.scene_texture.sample_as_bgra(self.pos);
+        }
+    }
+
     mod.draw.DrawBox = mod.std.set_type_default() do #(DrawBox::script_shader(vm)){
+        alpha_blend: false
+        backface_culling: true
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -57,7 +68,7 @@ script_mod! {
             self.face = self.geom.geom_id;
             let c = self.clip(p);
             self.cw = c.w;
-            self.vertex_pos = vec4(c.x, c.y, (0.55 + 0.45 * c.z / c.w) * c.w, c.w);
+            self.vertex_pos = c;
         }
 
         fragment: fn() {
@@ -85,6 +96,9 @@ script_mod! {
     }
 
     mod.draw.DrawTile = mod.std.set_type_default() do #(DrawTile::script_shader(vm)){
+        alpha_blend: false
+        // QuadGeom winds clockwise after its y coordinate becomes world z.
+        backface_culling: false
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -118,7 +132,7 @@ script_mod! {
             self.lp = self.geom.pos * self.tile.zw;
             let c = self.clip(p);
             self.cw = c.w;
-            self.vertex_pos = vec4(c.x, c.y, (0.55 + 0.45 * c.z / c.w - 0.00002) * c.w, c.w);
+            self.vertex_pos = vec4(c.x, c.y, c.z - 0.00002 * c.w, c.w);
         }
 
         fragment: fn() {
@@ -144,6 +158,8 @@ script_mod! {
     }
 
     mod.draw.DrawGlyph = mod.std.set_type_default() do #(DrawGlyph::script_shader(vm)){
+        alpha_blend: true
+        backface_culling: false
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -175,7 +191,7 @@ script_mod! {
             self.tex = (self.cell + self.geom.pos) / vec2(16.0, 6.0);
             let c = self.clip(p);
             self.cw = c.w;
-            self.vertex_pos = vec4(c.x, c.y, (0.55 + 0.45 * c.z / c.w - 0.00005) * c.w, c.w);
+            self.vertex_pos = vec4(c.x, c.y, c.z - 0.00005 * c.w, c.w);
         }
 
         fragment: fn() {
@@ -201,6 +217,8 @@ script_mod! {
         draw_box: mod.draw.DrawBox{}
         draw_tile: mod.draw.DrawTile{}
         draw_glyph: mod.draw.DrawGlyph{}
+        draw_scene_texture: mod.draw.DrawSceneTexture{}
+        clear_color: #x0A1128
         draw_panel: mod.draw.DrawColor{ color: #x0A1128D8 }
         draw_title: mod.draw.DrawText{
             color: #x00B4D8
@@ -218,6 +236,19 @@ script_mod! {
             color: #xF5F7FA
             text_style: theme.font_bold{ font_size: 20.0 }
         }
+    }
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawSceneTexture {
+    #[deref]
+    draw_super: DrawQuad,
+}
+
+impl DrawSceneTexture {
+    fn set_texture(&mut self, texture: &Texture) {
+        self.draw_super.draw_vars.set_texture(0, texture);
     }
 }
 
@@ -350,6 +381,10 @@ pub struct CodeScape {
     #[live]
     draw_glyph: DrawGlyph,
     #[live]
+    draw_scene_texture: DrawSceneTexture,
+    #[live]
+    clear_color: Vec4,
+    #[live]
     draw_panel: DrawColor,
     #[live]
     draw_title: DrawText,
@@ -361,6 +396,17 @@ pub struct CodeScape {
     draw_caption: DrawText,
     #[live]
     font_file: Option<ScriptHandleRef>,
+
+    #[new]
+    scene_pass: DrawPass,
+    #[new]
+    scene_draw_list: DrawList2d,
+    #[new]
+    scene_color: Texture,
+    #[new]
+    scene_depth: Texture,
+    #[rust(false)]
+    render_initialized: bool,
 
     #[rust]
     scene: Option<Scene>,
@@ -394,7 +440,15 @@ pub struct CodeScape {
     #[rust]
     frame_index: usize,
     #[rust]
+    pending_capture: Option<PendingCapture>,
+    #[rust]
     glyph_buf: Vec<f32>,
+}
+
+struct PendingCapture {
+    ticket: ReadbackTicket,
+    path: PathBuf,
+    quit_after: bool,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -488,62 +542,6 @@ fn git(root: &std::path::Path, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-const WINDOW_TITLE: &str = "FLOP codescape";
-
-/// How this platform saves a frame of the window, if it can.
-fn grab() -> Option<Grab> {
-    #[cfg(target_os = "macos")]
-    {
-        let found = window_number().map(Grab::ScreenCapture);
-        if found.is_none() {
-            log!("codescape: no window titled {WINDOW_TITLE:?} to capture");
-        }
-        found
-    }
-    #[cfg(not(target_os = "macos"))]
-    Some(Grab::Xwd)
-}
-
-/// The number of our window, which is what `screencapture -l` takes. Makepad
-/// also keeps an untitled helper window, so match on the title, as xwd does.
-#[cfg(target_os = "macos")]
-fn window_number() -> Option<u32> {
-    use makepad_widgets::makepad_platform::makepad_objc_sys::{
-        class, msg_send, runtime::Object, sel, sel_impl,
-    };
-    use std::ffi::{c_char, CStr};
-    // SAFETY: plain AppKit getters on the main thread, which is where Makepad
-    // delivers the events this is called from.
-    unsafe {
-        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
-        let windows: *mut Object = msg_send![app, windows];
-        let count: usize = msg_send![windows, count];
-        for i in 0..count {
-            let w: *mut Object = msg_send![windows, objectAtIndex: i];
-            let title: *mut Object = msg_send![w, title];
-            if title.is_null() {
-                continue;
-            }
-            let utf8: *const c_char = msg_send![title, UTF8String];
-            if !utf8.is_null() && CStr::from_ptr(utf8).to_bytes() == WINDOW_TITLE.as_bytes() {
-                let n: isize = msg_send![w, windowNumber];
-                return u32::try_from(n).ok();
-            }
-        }
-    }
-    None
-}
-
-fn save_frame(g: Grab, path: &Path) {
-    let ok = g
-        .command(WINDOW_TITLE, path)
-        .status()
-        .is_ok_and(|s| s.success());
-    if !ok {
-        log!("codescape: could not save {}", path.display());
-    }
-}
-
 /// Highest mip level of the minimap: level 0 plus four halvings.
 const MIP_LEVELS: usize = 4;
 
@@ -581,6 +579,121 @@ fn upload(cx: &mut Cx, mut img: Image, mips: bool) -> Texture {
 }
 
 impl CodeScape {
+    fn ensure_render_targets(&mut self, cx: &mut Cx) {
+        if self.render_initialized {
+            return;
+        }
+        self.render_initialized = true;
+        self.scene_color = Texture::new_with_format(
+            cx,
+            TextureFormat::RenderBGRAu8 {
+                size: TextureSize::Auto,
+                initial: true,
+            },
+        );
+        self.scene_depth = Texture::new_with_format(
+            cx,
+            TextureFormat::DepthD32 {
+                size: TextureSize::Auto,
+                initial: true,
+            },
+        );
+        self.scene_pass.set_color_texture(
+            cx,
+            &self.scene_color,
+            DrawPassClearColor::ClearWith(self.clear_color),
+        );
+        self.scene_pass.set_depth_texture(
+            cx,
+            &self.scene_depth,
+            DrawPassClearDepth::ClearWith(1.0),
+        );
+    }
+
+    fn queue_capture(&mut self, cx: &mut Cx, path: PathBuf, quit_after: bool) -> bool {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                log!(
+                    "codescape: could not create capture directory {}: {error}",
+                    parent.display()
+                );
+                cx.quit();
+                return false;
+            }
+        }
+        match self
+            .scene_color
+            .read_back(cx, ReadbackRequest { next_render: false })
+        {
+            Ok(ticket) => {
+                self.pending_capture = Some(PendingCapture {
+                    ticket,
+                    path,
+                    quit_after,
+                });
+                true
+            }
+            Err(error) => {
+                log!("codescape: could not capture {}: {error}", path.display());
+                cx.quit();
+                false
+            }
+        }
+    }
+
+    fn drain_captures(&mut self, cx: &mut Cx) {
+        for frame in cx.try_take_texture_readbacks() {
+            let Some(pending) = self.pending_capture.take() else {
+                continue;
+            };
+            if frame.ticket != pending.ticket {
+                self.pending_capture = Some(pending);
+                continue;
+            }
+            let result = frame
+                .data
+                .map_err(|error| error.to_string())
+                .and_then(|pixels| {
+                    let rgba = rgba_pixels(
+                        frame.width,
+                        frame.height,
+                        frame.stride,
+                        &pixels,
+                        frame.channel_order == ReadbackChannelOrder::Bgra,
+                        frame.origin == ReadbackOrigin::BottomLeft,
+                    )
+                    .ok_or_else(|| "readback returned invalid dimensions".to_string())?;
+                    let png =
+                        Cx::encode_rgba_as_png(frame.width as u32, frame.height as u32, &rgba)?;
+                    std::fs::write(&pending.path, png).map_err(|error| error.to_string())
+                });
+            if let Err(error) = result {
+                log!(
+                    "codescape: could not save {}: {error}",
+                    pending.path.display()
+                );
+                cx.quit();
+                return;
+            }
+            if pending.quit_after {
+                cx.quit();
+            } else {
+                self.request_frame(cx);
+            }
+        }
+    }
+
+    fn quit_after_capture(&mut self, cx: &mut Cx) {
+        if let Some(pending) = self.pending_capture.as_mut() {
+            pending.quit_after = true;
+        } else {
+            cx.quit();
+        }
+    }
+
     /// The monospace TTF the glyph atlas is rasterised from, declared in the
     /// script as a `crate_resource` of `makepad_widgets` and read through the
     /// script resource table (`Cx::load_script_resource` fills it on demand).
@@ -861,10 +974,8 @@ impl CodeScape {
         if let Some(shot) = self.opts.shot.clone() {
             self.frame_index += 1;
             if self.frame_index == 8 {
-                if let Some(g) = grab() {
-                    save_frame(g, &shot);
-                }
-                cx.quit();
+                self.queue_capture(cx, shot, true);
+                return;
             }
             self.area.redraw(cx);
             self.request_frame(cx);
@@ -874,9 +985,9 @@ impl CodeScape {
             // Capture the frame presented before this tick, then advance the
             // tour by a fixed step so the video is smooth at any render speed.
             if self.frame_index > 2 {
-                if let Some(g) = grab() {
-                    let name = format!("f{:05}.{}", self.frame_index - 3, g.extension());
-                    save_frame(g, &dir.join(name));
+                let name = format!("f{:05}.png", self.frame_index - 3);
+                if !self.queue_capture(cx, dir.join(name), false) {
+                    return;
                 }
             }
             self.frame_index += 1;
@@ -895,7 +1006,7 @@ impl CodeScape {
                 None => {
                     self.tour = None;
                     if self.opts.exit_after_tour {
-                        cx.quit();
+                        self.quit_after_capture(cx);
                     }
                 }
             }
@@ -904,7 +1015,7 @@ impl CodeScape {
             self.advance_trace(step);
         }
         if self.opts.record.is_some() && self.trace.as_ref().is_some_and(|t| t.finished()) {
-            cx.quit();
+            self.quit_after_capture(cx);
         }
         if let Some((from, to, start, secs)) = self.fly {
             let start = start.unwrap_or(time);
@@ -943,7 +1054,7 @@ impl CodeScape {
             }
         }
         self.area.redraw(cx);
-        if self.animating() {
+        if self.animating() && self.pending_capture.is_none() {
             self.request_frame(cx);
         }
     }
@@ -1201,6 +1312,9 @@ impl Widget for CodeScape {
         if !self.opts.parsed {
             self.opts = Options::parse();
         }
+        if let Event::Signal = event {
+            self.drain_captures(cx);
+        }
         if let Some(ne) = self.next_frame.is_event(event) {
             self.tick(cx, ne.time);
         }
@@ -1345,6 +1459,10 @@ impl Widget for CodeScape {
             w: r.size.x,
             h: r.size.y,
         };
+        if r.size.x <= 1.0 || r.size.y <= 1.0 {
+            return DrawStep::done();
+        }
+        self.ensure_render_targets(cx.cx);
         if self.scene.is_none() {
             self.load(cx);
             self.last_time = 0.0;
@@ -1354,8 +1472,40 @@ impl Widget for CodeScape {
             cx.set_key_focus(self.area);
         }
         let view = self.view();
+
+        self.scene_pass.set_size(cx, r.size);
+        self.scene_pass.set_color_texture(
+            cx,
+            &self.scene_color,
+            DrawPassClearColor::ClearWith(self.clear_color),
+        );
+        self.scene_pass.set_depth_texture(
+            cx,
+            &self.scene_depth,
+            DrawPassClearDepth::ClearWith(1.0),
+        );
+        cx.make_child_pass(&self.scene_pass);
+        // Captures are 1920x1080 rather than Retina-sized, and remain within
+        // Makepad's bounded readback queue. Interactive rendering keeps the
+        // display's native density.
+        let capture_dpi = (self.opts.record.is_some() || self.opts.shot.is_some()).then_some(1.0);
+        cx.begin_pass(&self.scene_pass, capture_dpi);
+        self.scene_draw_list.begin_always(cx);
+        cx.begin_root_turtle(r.size, makepad_widgets::Layout::flow_overlay());
         self.draw_scene(cx, &view);
+        let parent_rect = self.rect;
+        self.rect.x = 0.0;
+        self.rect.y = 0.0;
         self.draw_hud(cx);
+        self.rect = parent_rect;
+        cx.end_pass_sized_turtle();
+        self.scene_draw_list.end(cx);
+        cx.end_pass(&self.scene_pass);
+
+        self.draw_scene_texture.set_texture(&self.scene_color);
+        self.draw_scene_texture.draw_abs(cx, r);
+        self.area = self.draw_scene_texture.area();
+        cx.set_pass_area(&self.scene_pass, self.area);
         DrawStep::done()
     }
 }
