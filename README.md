@@ -1,10 +1,10 @@
 # codescape
 
-A 3D map of the flop-core source that you can fly through, built on
+A 3D map of a Git repository's source that you can fly through, built on
 [Makepad](https://github.com/makepad/makepad). It is inspired by Rik Arends'
 Makepad source visualizer.
 
-![overview](docs/overview.jpg)
+![Overview of the flop-core repository](docs/overview.jpg)
 
 Each directory is a raised block, and nested directories stack on top of their
 parent. Each file is a flat tile holding its real text, split into columns so
@@ -20,7 +20,7 @@ It uses two levels of detail:
   character, drawn from a signed-distance-field font atlas. Nearest files come
   first, up to 450k glyphs, and the text stays sharp at any zoom.
 
-A scan and layout of flop-core takes about 0.6 s. All text is uploaded once;
+A scan and layout of the example flop-core repository takes about 0.6 s. All text is uploaded once;
 the camera changes only uniforms and the near-glyph set.
 
 ## Build
@@ -33,8 +33,9 @@ Makepad, so its tests and the benchmark build and run on a machine with no GPU,
 no X server and no GUI development packages:
 
 ```sh
-cargo test --lib --no-default-features      # or: just verify-codescape
-cargo run  --release --no-default-features --bin bench
+cargo test --locked --lib --no-default-features
+cargo run --locked --release --no-default-features --bin bench -- /path/to/repo
+cargo build --locked --release --bin codescape
 ```
 
 The renderer itself needs the libraries any Makepad app links against:
@@ -58,9 +59,8 @@ The renderer builds against Makepad from its `dev` branch. Makepad is not
 published to crates.io any more, so the 1.0.0 release sitting there is a dead
 end. `Cargo.toml` pins an explicit revision —
 `88639f79a2365081285529f1d5138416be8fdd60`, the `dev` head on 2026-09-22 —
-rather than tracking the branch itself, because `**/Cargo.lock` is gitignored
-across this repository: a `branch = "dev"` dependency would resolve to
-whatever `dev` happened to be on every fresh checkout and in CI.
+rather than tracking the branch itself. `Cargo.lock` also records the resolved
+dependency set for repeatable builds.
 
 To move to a newer Makepad, read the branch head:
 
@@ -68,9 +68,9 @@ To move to a newer Makepad, read the branch head:
 git ls-remote https://github.com/makepad/makepad dev   # or: work
 ```
 
-Put that sha in the `rev` in `tools/codescape/Cargo.toml`, with the date in
-the comment beside it, rebuild, and re-run the checks in this README: `just
-verify-codescape`, `cargo build --release`, the Linux cross-check `cargo check
+Put that sha in the `rev` in `Cargo.toml`, with the date in
+the comment beside it, update `Cargo.lock`, rebuild, and re-run the checks in this README: `cargo
+test --locked --lib --no-default-features`, `cargo build --locked --release`, the Linux cross-check `cargo check
 --target x86_64-unknown-linux-gnu --bin codescape`, and a run of the app.
 `dev` is the default branch and it moves fast.
 
@@ -136,10 +136,9 @@ compiles Objective-C and needs the real macOS SDK.
 ## Run
 
 ```sh
-cd tools/codescape
-cargo run --release                  # repo containing the current directory
-cargo run --release -- /path/to/repo # any git checkout
-cargo run --release -- --tour --loop # scripted flight, repeating
+cargo run --locked --release -- /path/to/repo # any git checkout
+cargo run --locked --release                 # repo containing the current directory
+cargo run --locked --release -- /path/to/repo --tour --loop
 ```
 
 | Input | Action |
@@ -209,19 +208,20 @@ the union of both trees, which is a larger change than this one.
 
 The diff is parsed from a unified patch by `src/diff.rs`, fed either by
 `git diff -U0` or by `gh pr diff`, so a pull request needs no local branch.
-`--pr` derives `owner/repo` from the origin URL, because this repository's
-origin is a proxy scheme that `gh` cannot resolve on its own.
+`--pr` derives `owner/repo` from the selected repository's origin URL, including
+proxy schemes that `gh` cannot resolve on their own.
 
 ## Quint counterexamples
 
 A Quint run that violates an invariant emits an ITF trace: an ordered list of
 states binding every state variable. The spec that produced it is already a
 tile on the map, so a trace needs no new geometry — it is the same overlay,
-with marks that move as the trace is stepped.
+with marks that move as the trace is stepped. For example, from a flop-core
+checkout with the codescape binary built:
 
 ```sh
 just quint-itf formal-specs/channel/channel-payout-liveness.qnt inv_escape_naive_safe
-cargo run --release -- \
+/path/to/codescape/target/release/codescape . \
   --trace formal-specs/channel/channel-payout-liveness.inv_escape_naive_safe.itf.json
 ```
 
@@ -247,7 +247,7 @@ second):
 ```sh
 quint run formal-specs/channel/channel-payout-liveness.qnt \
   --max-steps=600 --max-samples=1 --seed=7 --backend=rust --out-itf=/tmp/long.itf.json
-cargo run --release -- --trace /tmp/long.itf.json --trace-rate 60
+/path/to/codescape/target/release/codescape . --trace /tmp/long.itf.json --trace-rate 60
 ```
 
 With `--trace`, `--record DIR` records the trace instead of the tour: it
@@ -256,7 +256,7 @@ exits. 600 steps at 60 a second make an 11.5 s video (frames are PNG on
 every backend):
 
 ```sh
-cargo run --release -- --trace /tmp/long.itf.json --trace-rate 60 --record /tmp/frames
+/path/to/codescape/target/release/codescape . --trace /tmp/long.itf.json --trace-rate 60 --record /tmp/frames
 ffmpeg -framerate 30 -i /tmp/frames/f%05d.png -vf scale=1920:-2 \
   -c:v libx264 -pix_fmt yuv420p -crf 20 trace.mp4
 ```

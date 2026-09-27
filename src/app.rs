@@ -8,7 +8,7 @@ script_mod! {
     startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
-                window.title: "FLOP codescape"
+                window.title: "codescape"
                 window.inner_size: vec2(1920, 1080)
                 // 2.0 draws a title strip on macOS by default; 1.0 ran the
                 // scene full-height under the traffic lights.

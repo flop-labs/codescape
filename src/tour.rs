@@ -56,7 +56,7 @@ fn file_view(l: &Layout, path: &str, sources_paths: &[&str]) -> Option<(Camera, 
 }
 
 impl Tour {
-    pub fn flop_core(l: &Layout, paths: &[&str], looped: bool) -> Tour {
+    pub fn for_repo(l: &Layout, paths: &[&str], looped: bool) -> Tour {
         let home = overview(l);
         let mut shots = vec![Shot {
             cam: home,
@@ -65,7 +65,8 @@ impl Tour {
             drift: v3(0.0, 0.0, 0.0),
             yaw_drift: 0.02,
             caption: Some(format!(
-                "flop-core: {} files, {:.2}M lines",
+                "{}: {} files, {:.2}M lines",
+                l.dirs[0].name,
                 l.files.len(),
                 l.total_lines as f64 / 1e6
             )),

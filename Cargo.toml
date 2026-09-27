@@ -3,7 +3,7 @@ name = "codescape"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Fly through the flop-core source tree in 3D (Makepad, GPU-rendered)"
+description = "Fly through a Git repository's source tree in 3D (Makepad, GPU-rendered)"
 # `bench` is a second binary, so plain `cargo run` needs to be told which.
 default-run = "codescape"
 
@@ -12,8 +12,8 @@ default-run = "codescape"
 # without X11/ALSA/PulseAudio development headers.
 #
 # Makepad is not published to crates.io any more (1.0.0 there is a dead end whose Metal
-# backend cannot upload mip chains). Track `dev`, pinned because Cargo.lock is not
-# committed. Pinned 2026-09-22 at dev HEAD. To bump: `git ls-remote https://github.com/makepad/makepad dev`,
+# backend cannot upload mip chains). Pinned 2026-09-22 at dev HEAD. To bump:
+# `git ls-remote https://github.com/makepad/makepad dev`,
 # put the new sha here, rebuild, re-run the checks in README.
 makepad-widgets = { git = "https://github.com/makepad/makepad", rev = "88639f79a2365081285529f1d5138416be8fdd60", optional = true }
 fontdue = "0.9"

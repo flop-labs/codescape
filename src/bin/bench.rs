@@ -141,7 +141,7 @@ fn main() {
 
     // Per-frame CPU: walk the tour and collect the glyph set for each frame.
     let paths: Vec<&str> = sources.iter().map(|s| s.path.as_str()).collect();
-    let mut tour = Tour::flop_core(&layout, &paths, true);
+    let mut tour = Tour::for_repo(&layout, &paths, true);
     let n = layout.files.len();
     let mut sc = scene::Scene {
         sources,

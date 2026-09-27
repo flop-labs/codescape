@@ -763,7 +763,7 @@ impl CodeScape {
         );
         if self.opts.tour {
             let paths: Vec<&str> = sources.iter().map(|s| s.path.as_str()).collect();
-            let mut tour = Tour::flop_core(&layout, &paths, self.opts.tour_loop);
+            let mut tour = Tour::for_repo(&layout, &paths, self.opts.tour_loop);
             if let Some(at) = self.opts.at {
                 if let Some(c) = tour.advance(at) {
                     self.cam = c;
@@ -1404,7 +1404,7 @@ impl Widget for CodeScape {
                         self.fly = None;
                         let paths: Vec<&str> =
                             scene.sources.iter().map(|s| s.path.as_str()).collect();
-                        let mut t = Tour::flop_core(&scene.layout, &paths, true);
+                        let mut t = Tour::for_repo(&scene.layout, &paths, true);
                         t.start_from(self.cam);
                         self.tour = Some(t);
                         self.request_frame(cx);

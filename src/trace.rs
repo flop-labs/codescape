@@ -488,7 +488,7 @@ mod tests {
 
     const REAL: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../formal-specs/channel/channel-payout-liveness.inv_escape_naive_safe.itf.json"
+        "/tests/fixtures/channel-payout-liveness.inv_escape_naive_safe.itf.json"
     );
 
     #[test]
